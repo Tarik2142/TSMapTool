@@ -8,15 +8,16 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from tsmap import MapToolError, find_game_dir, open_game, save_game_dir  # noqa: E402
+from tsmap import (LANGUAGES, MapToolError, _, find_game_dir, get_language, init_language,  # noqa: E402
+                   open_game, save_config, save_game_dir, set_language)
 
-KIND = {'original': 'оригінал', 'custom': 'додана', 'hidden': 'прихована', 'broken': 'пошкоджена'}
+KIND = {'original': 'original', 'custom': 'added', 'hidden': 'hidden', 'broken': 'broken'}
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('TimeShift — менеджер карт')
+        init_language()
         self.geometry('1300x740')
         self.minsize(900, 560)
         self.game = None
@@ -32,25 +33,32 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------- layout
     def _build(self):
+        self.title(_('TimeShift map manager'))
         top = ttk.Frame(self, padding=(8, 8, 8, 0))
         top.pack(fill='x')
-        ttk.Label(top, text='Папка гри:').pack(side='left')
-        self.game_var = tk.StringVar(value='—')
+        ttk.Label(top, text=_('Game folder:')).pack(side='left')
+        self.game_var = tk.StringVar(value=self.game.dir if self.game else '—')
         ttk.Label(top, textvariable=self.game_var).pack(side='left', padx=6)
-        ttk.Button(top, text='Змінити…', command=self._choose_game).pack(side='left')
+        ttk.Button(top, text=_('Change…'), command=self._choose_game).pack(side='left')
+        self.lang_var = tk.StringVar(value=LANGUAGES[get_language()])
+        lang_box = ttk.Combobox(top, textvariable=self.lang_var, values=list(LANGUAGES.values()),
+                                state='readonly', width=12)
+        lang_box.pack(side='right')
+        lang_box.bind('<<ComboboxSelected>>', self._change_language)
+        ttk.Label(top, text=_('Language:')).pack(side='right', padx=(12, 4))
         self.pending_var = tk.StringVar()
         ttk.Label(top, textvariable=self.pending_var, foreground='#b05000').pack(side='right')
 
         bar = ttk.Frame(self, padding=8)
         bar.pack(fill='x')
         self.buttons = [
-            ttk.Button(bar, text='Імпорт файлу…', command=self._import_files),
-            ttk.Button(bar, text='Імпорт папки…', command=self._import_folder),
-            ttk.Button(bar, text='Експорт…', command=self._export),
-            ttk.Button(bar, text='Видалити / приховати', command=self._remove),
-            ttk.Button(bar, text='Повернути приховану', command=self._unhide),
-            ttk.Button(bar, text='Застосувати', command=self._apply),
-            ttk.Button(bar, text='Відновити оригінал гри', command=self._restore),
+            ttk.Button(bar, text=_('Import file…'), command=self._import_files),
+            ttk.Button(bar, text=_('Import folder…'), command=self._import_folder),
+            ttk.Button(bar, text=_('Export…'), command=self._export),
+            ttk.Button(bar, text=_('Remove / hide'), command=self._remove),
+            ttk.Button(bar, text=_('Unhide'), command=self._unhide),
+            ttk.Button(bar, text=_('Apply'), command=self._apply),
+            ttk.Button(bar, text=_('Restore original game'), command=self._restore),
         ]
         for b in self.buttons:
             b.pack(side='left', padx=(0, 6))
@@ -61,8 +69,9 @@ class App(tk.Tk):
         body.add(left, weight=3)
         cols = ('id', 'title', 'class', 'modes', 'players', 'kind')
         self.tree = ttk.Treeview(left, columns=cols, show='headings', selectmode='extended')
-        for c, t, w, a in (('id', 'ID', 36, 'e'), ('title', 'Назва', 210, 'w'), ('class', 'Рівень', 130, 'w'),
-                           ('modes', 'Режими', 160, 'w'), ('players', 'Гравці', 56, 'center'), ('kind', 'Стан', 80, 'w')):
+        for c, t, w, a in (('id', 'ID', 36, 'e'), ('title', _('Title'), 210, 'w'), ('class', _('Level'), 130, 'w'),
+                           ('modes', _('Modes'), 160, 'w'), ('players', _('Players'), 56, 'center'),
+                           ('kind', _('State'), 80, 'w')):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor=a, stretch=c == 'title')
         self.tree.tag_configure('custom', foreground='#2e9e2e')
@@ -89,6 +98,21 @@ class App(tk.Tk):
 
         self.log = tk.Text(self, height=8, wrap='word', state='disabled')
         self.log.pack(fill='x', padx=8, pady=8)
+
+    def _change_language(self, event=None):
+        code = next(c for c, n in LANGUAGES.items() if n == self.lang_var.get())
+        if code == get_language():
+            return
+        if self.busy:
+            self.lang_var.set(LANGUAGES[get_language()])
+            return
+        set_language(code)
+        save_config(lang=code)
+        for w in self.winfo_children():
+            w.destroy()
+        self.details_cache.clear()
+        self._build()
+        self._refresh()
 
     # ------------------------------------------------------------- helpers
     def _say(self, msg):
@@ -135,8 +159,8 @@ class App(tk.Tk):
         for b in self.buttons:
             b.state(['!disabled'])
         if err:
-            self._say('Помилка: %s' % err)
-            messagebox.showerror('Помилка', err)
+            self._say(_('Error: %s', err))
+            messagebox.showerror(_('Error'), err)
         if refresh:
             self.details_cache.clear()
             self._refresh()
@@ -151,7 +175,7 @@ class App(tk.Tk):
                 self.game.close()
             d = path or find_game_dir()
             if not d:
-                d = filedialog.askdirectory(title='Вкажіть папку TimeShift')
+                d = filedialog.askdirectory(title=_('Select the TimeShift folder'))
                 if not d:
                     self.destroy()
                     return
@@ -160,13 +184,13 @@ class App(tk.Tk):
             self.game_var.set(self.game.dir)
             self.game.ensure_backup(self._say)
         except MapToolError as e:
-            messagebox.showerror('Помилка', str(e))
+            messagebox.showerror(_('Error'), str(e))
             self.game = None
             return
         self._refresh()
 
     def _choose_game(self):
-        d = filedialog.askdirectory(title='Вкажіть папку TimeShift')
+        d = filedialog.askdirectory(title=_('Select the TimeShift folder'))
         if d:
             self._open_game(d)
 
@@ -179,31 +203,31 @@ class App(tk.Tk):
                 rows = self.game.maps()
                 pending = self.game.pending()
         except MapToolError as e:
-            messagebox.showerror('Помилка', str(e))
+            messagebox.showerror(_('Error'), str(e))
             return
         self.tree.delete(*self.tree.get_children())
         for r in rows:
             iid = self.tree.insert('', 'end', values=(r['id'], r['title'], r['class'], ' '.join(r['modes']),
-                                                     r['players'], KIND.get(r['kind'], r['kind'])), tags=(r['kind'],))
+                                                     r['players'], _(KIND.get(r['kind'], r['kind']))), tags=(r['kind'],))
             if r['class'] in sel:
                 self.tree.selection_add(iid)
         self.rows = {r['class']: r for r in rows}
-        self.pending_var.set('Є незастосовані зміни — натисніть «Застосувати»' if pending else '')
+        self.pending_var.set(_('There are unapplied changes — press «Apply»') if pending else '')
 
     # ------------------------------------------------------------- details
-    def _on_select(self, _=None):
+    def _on_select(self, event=None):
         sel = self._selected()
         if len(sel) != 1:
             return
         cls = sel[0]
         r = self.rows.get(cls, {})
         self.name_var.set(r.get('title', cls))
-        meta = 'Рівень: %s   ID: %s   Стан: %s\nРежими: %s   Гравці: %s' % (
-            cls, r.get('id'), KIND.get(r.get('kind'), ''), ' '.join(r.get('modes', [])), r.get('players', ''))
+        meta = _('Level: %s   ID: %s   State: %s\nModes: %s   Players: %s',
+                 cls, r.get('id'), _(KIND.get(r.get('kind'), '')), ' '.join(r.get('modes', [])), r.get('players', ''))
         if r.get('source'):
-            meta += '\nДжерело: %s' % r['source']
+            meta += '\n' + _('Source: %s', r['source'])
         if r.get('error'):
-            meta += '\nПомилка: %s' % r['error']
+            meta += '\n' + _('Error: %s', r['error'])
         self.meta_var.set(meta)
         if cls in self.details_cache:
             self._show_details(cls, *self.details_cache[cls])
@@ -216,7 +240,7 @@ class App(tk.Tk):
                 with self.lock:
                     desc, png = self.game.map_details(cls)
             except Exception as e:
-                desc, png = 'Не вдалося прочитати: %s' % e, None
+                desc, png = _('Cannot read: %s', e), None
             self.details_cache[cls] = (desc, png)
             self.msgs.put(('call', lambda: self._show_details(cls, desc, png)))
         threading.Thread(target=work, daemon=True).start()
@@ -230,7 +254,7 @@ class App(tk.Tk):
             self.img.configure(image=self.photo, text='')
         else:
             self.photo = None
-            self.img.configure(image='', text='(немає превʼю)')
+            self.img.configure(image='', text=_('(no preview)'))
 
     def _set_desc(self, text):
         self.desc.configure(state='normal')
@@ -241,13 +265,13 @@ class App(tk.Tk):
     # ------------------------------------------------------------- actions
     def _import_files(self):
         paths = filedialog.askopenfilenames(
-            title='Імпорт карт: Xbox 360 DLC-пакет або .tsmap',
-            filetypes=[('Усі файли (Xbox DLC-пакети без розширення)', '*'), ('Карти TimeShift', '*.tsmap')])
+            title=_('Import maps: Xbox 360 DLC package or .tsmap'),
+            filetypes=[(_('All files (Xbox DLC packages have no extension)'), '*'), (_('TimeShift maps'), '*.tsmap')])
         if paths:
             self._do_import(list(paths))
 
     def _import_folder(self):
-        d = filedialog.askdirectory(title='Розпакована папка Xbox DLC (з .s3dpak / .s3dlst)')
+        d = filedialog.askdirectory(title=_('Extracted Xbox DLC folder (with .s3dpak / .s3dlst)'))
         if d:
             self._do_import([d])
 
@@ -259,28 +283,28 @@ class App(tk.Tk):
             if added:
                 self.game.apply(self._say)
             else:
-                self._say('Нових карт не додано')
-        self._run('Імпорт', fn)
+                self._say(_('No new maps were added'))
+        self._run(_('Import'), fn)
 
     def _export(self):
         sel = self._selected()
         if not sel:
-            messagebox.showinfo('Експорт', 'Виберіть карту в списку')
+            messagebox.showinfo(_('Export'), _('Select a map in the list'))
             return
         if len(sel) == 1:
-            out = filedialog.asksaveasfilename(title='Експорт карти', defaultextension='.tsmap',
-                                               initialfile=sel[0] + '.tsmap', filetypes=[('Карти TimeShift', '*.tsmap')])
+            out = filedialog.asksaveasfilename(title=_('Export map'), defaultextension='.tsmap',
+                                               initialfile=sel[0] + '.tsmap', filetypes=[(_('TimeShift maps'), '*.tsmap')])
             targets = [(sel[0], out)] if out else []
         else:
-            d = filedialog.askdirectory(title='Папка для експорту')
+            d = filedialog.askdirectory(title=_('Export folder'))
             targets = [(c, os.path.join(d, c + '.tsmap')) for c in sel] if d else []
         if targets:
-            self._run('Експорт', lambda: [self.game.export_map(c, o, self._say) for c, o in targets], refresh=False)
+            self._run(_('Export'), lambda: [self.game.export_map(c, o, self._say) for c, o in targets], refresh=False)
 
     def _remove(self):
         sel = self._selected()
         if not sel:
-            messagebox.showinfo('Видалення', 'Виберіть карту в списку')
+            messagebox.showinfo(_('Removal'), _('Select a map in the list'))
             return
         custom = [c for c in sel if self.rows[c]['kind'] in ('custom', 'broken')]
         orig = [c for c in sel if self.rows[c]['kind'] == 'original']
@@ -288,37 +312,37 @@ class App(tk.Tk):
             return
         text = []
         if custom:
-            text.append('Видалити додані карти:\n  ' + '\n  '.join(custom))
+            text.append(_('Remove added maps:') + '\n  ' + '\n  '.join(custom))
         if orig:
-            text.append('Приховати з меню оригінальні карти (їх можна повернути):\n  ' + '\n  '.join(orig))
-        if not messagebox.askyesno('Підтвердження', '\n\n'.join(text)):
+            text.append(_('Hide original maps from the menu (they can be restored):') + '\n  ' + '\n  '.join(orig))
+        if not messagebox.askyesno(_('Confirmation'), '\n\n'.join(text)):
             return
 
         def fn():
             for c in custom + orig:
                 self.game.remove_map(c, self._say)
             self.game.apply(self._say)
-        self._run('Видалення', fn)
+        self._run(_('Removal'), fn)
 
     def _unhide(self):
         sel = [c for c in self._selected() if self.rows[c]['kind'] == 'hidden']
         if not sel:
-            messagebox.showinfo('Повернення', 'Виберіть приховану оригінальну карту')
+            messagebox.showinfo(_('Unhide maps'), _('Select a hidden original map'))
             return
 
         def fn():
             for c in sel:
                 self.game.unhide_map(c, self._say)
             self.game.apply(self._say)
-        self._run('Повернення карт', fn)
+        self._run(_('Unhide maps'), fn)
 
     def _apply(self):
-        self._run('Застосування', lambda: self.game.apply(self._say))
+        self._run(_('Applying'), lambda: self.game.apply(self._say))
 
     def _restore(self):
-        if messagebox.askyesno('Відновлення', 'Повернути оригінальні архіви гри?\n\n'
-                               'Бібліотека карт залишиться — карти можна повернути кнопкою «Застосувати».'):
-            self._run('Відновлення оригіналу', lambda: self.game.restore(self._say))
+        if messagebox.askyesno(_('Restore'), _('Put the original game archives back?\n\n'
+                                              'The map library is kept — press «Apply» to bring the maps back.')):
+            self._run(_('Restoring the original game'), lambda: self.game.restore(self._say))
 
 
 if __name__ == '__main__':

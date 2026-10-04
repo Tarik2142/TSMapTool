@@ -15,6 +15,7 @@ import zipfile
 import zlib
 
 from . import s3darc, xbox
+from .i18n import _
 
 LANGS = ['czech', 'english', 'french', 'german', 'hungarian', 'italian', 'polish', 'russian', 'spanish']
 XBOX_LANGS = {'english': 'English', 'french': 'French', 'german': 'German', 'italian': 'Italian', 'spanish': 'Spanish'}
@@ -66,12 +67,12 @@ class PsContainer:
             self.streams.append(data[p:p + cs])
             p += cs
         if p != len(data):
-            raise MapToolError('неочікувана структура контейнера ps')
+            raise MapToolError(_('unexpected ps container layout'))
 
     def find(self, needle):
         hits = [i for i, s in enumerate(self.streams) if needle in zlib.decompress(s)]
         if len(hits) != 1:
-            raise MapToolError('клас %r знайдено в ps %d раз(и)' % (needle, len(hits)))
+            raise MapToolError(_('class %r found %d times in ps', needle, len(hits)))
         return hits[0]
 
     def text(self, i):
@@ -83,7 +84,7 @@ class PsContainer:
         tab = self.recs[i][1]
         start = len(old) - tab[-1][1]
         if new[:start] != old[:start]:
-            raise MapToolError('змінювати можна лише останній клас у файлі ps')
+            raise MapToolError(_('only the last class of a ps file can be modified'))
         tab[-1][1] = len(new) - start
         self.streams[i] = s3darc.compress(new.encode('latin1'))
         self.recs[i][0] = len(self.streams[i])
@@ -156,7 +157,7 @@ def parse_maps(text):
     bl = _blocks(text)
     maps_blk = [b for b in bl if b[0] == 'maps' and b[4] == 1]
     if not maps_blk:
-        raise MapToolError('gs_map_list: не знайдено секцію maps')
+        raise MapToolError(_('gs_map_list: maps section not found'))
     _, _, mo, mc, _ = maps_blk[0]
     sections = [b for b in bl if b[4] == 2 and mo < b[2] < mc]
     out = []
@@ -187,7 +188,7 @@ def section_close_line(text, section):
     for name, _, op, cl, depth in bl:
         if name == section and depth == 2:
             return text.rfind('\n', 0, cl) + 1
-    raise MapToolError('gs_map_list: не знайдено секцію %s' % section)
+    raise MapToolError(_('gs_map_list: section %s not found', section))
 
 
 def map_block_text(cls, mid, entry):
@@ -238,7 +239,7 @@ class Bundle:
         with zipfile.ZipFile(path) as z:
             self.manifest = json.loads(z.read('manifest.json').decode('utf-8'))
         if self.manifest.get('format') != BUNDLE_FORMAT:
-            raise MapToolError('%s: непідтримуваний формат .tsmap' % path)
+            raise MapToolError(_('%s: unsupported .tsmap format', path))
 
     @property
     def cls(self):
@@ -280,7 +281,7 @@ class Game:
         self.lib_file = os.path.join(self.lib_dir, 'library.json')
         self.applied_file = os.path.join(self.lib_dir, 'applied.json')
         if not os.path.isfile(os.path.join(self.paks, 'out.s3darc')):
-            raise MapToolError('TimeShift не знайдено в %s (немає preload\\paks\\out.s3darc)' % self.dir)
+            raise MapToolError(_('TimeShift not found in %s (no preload\\paks\\out.s3darc)', self.dir))
         os.makedirs(self.lib_dir, exist_ok=True)
         self._orig = None
         self._cache = {}
@@ -296,9 +297,9 @@ class Game:
         finally:
             a.close()
         if '#ifndef _RETAIL' not in text:
-            raise MapToolError('Немає бекапу оригінальних архівів, а поточні вже змінені. '
-                               'Покладіть оригінальні patch*.s3darc у %s' % self.backup)
-        log('Бекап оригінальних архівів у %s' % self.backup)
+            raise MapToolError(_('There is no backup of the original archives and the current ones are already modified. '
+                                 'Put the original patch*.s3darc files into %s', self.backup))
+        log(_('Backing up the original archives to %s', self.backup))
         os.makedirs(self.backup, exist_ok=True)
         for f in os.listdir(self.paks):
             if f.lower().startswith('patch') and f.lower().endswith('.s3darc'):
@@ -446,14 +447,14 @@ class Game:
             for i in r:
                 if i not in used:
                     return i
-        raise MapToolError('закінчилися вільні id карт')
+        raise MapToolError(_('no free map ids left'))
 
     def add_bundle(self, b, log=_noop):
         cls = b.cls
         if cls.lower() in self.all_classes():
-            raise MapToolError('карта %s вже є' % cls)
+            raise MapToolError(_('map %s already exists', cls))
         if (cls.lower(), 0) in self.known[0]:
-            raise MapToolError('карта %s збігається з назвою оригінального рівня' % cls)
+            raise MapToolError(_('map %s clashes with an original level name', cls))
         lib = self.library()
         fname = re.sub(r'[^\w.-]', '_', cls) + '.tsmap'
         dst = os.path.join(self.lib_dir, fname)
@@ -461,12 +462,12 @@ class Game:
             shutil.copy2(b.path, dst)
         mid = self.free_id(lib)
         if mid >= 30:
-            log('Увага: id карти %d більший за діапазон одиночних рівнів (не перевірено)' % mid)
+            log(_('Warning: map id %d is above the singleplayer range (untested)', mid))
         lib['maps'].append({'class': cls, 'id': mid, 'file': fname, 'title': b.manifest.get('title', cls),
                             'source': b.manifest.get('source', ''),
                             'added': datetime.datetime.now().isoformat(timespec='seconds')})
         self.save_library(lib)
-        log('Додано %s (id %d)' % (cls, mid))
+        log(_('Added %s (id %d)', cls, mid))
         return mid
 
     # ---- map listing
@@ -522,7 +523,7 @@ class Game:
                 desc = string_lookup(self.orig_strings(lang), unquote(pd.get('description', ''))) or ''
                 e = self.orig['main'].get(unquote(pd.get('LoadingTexture', '')) + '_small', 6)
                 return desc, _preview(self.read_orig('main', e) if e else None)
-        raise MapToolError('невідома карта %s' % cls)
+        raise MapToolError(_('unknown map %s', cls))
 
     # ---- import
     def import_path(self, path, only=None, log=_noop):
@@ -538,7 +539,7 @@ class Game:
         levels = sorted({p[:-7] for p in files if p.lower().endswith('.s3dpak')},
                         key=lambda s: [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', s)])
         if not levels:
-            raise MapToolError('у %s не знайдено карт (.s3dpak)' % path)
+            raise MapToolError(_('no maps (.s3dpak) found in %s', path))
         log('%s: %s' % (os.path.basename(path), getattr(src, 'display_name', '')))
         desc = src.read('gs_pkg_desc.cls').decode('latin1') if 'gs_pkg_desc.cls' in files else ''
         xstr = {}
@@ -552,9 +553,9 @@ class Game:
             if only and lvl.lower() not in {o.lower() for o in only}:
                 continue
             if lvl.lower() in existing:
-                log('Пропущено %s: вже встановлена' % lvl)
+                log(_('Skipped %s: already installed', lvl))
                 continue
-            log('Конвертація %s ...' % lvl)
+            log(_('Converting %s ...', lvl))
             tmp = os.path.join(self.lib_dir, re.sub(r'[^\w.-]', '_', lvl) + '.tsmap')
             try:
                 b = self._convert_xbox_level(src, files, lvl, desc, xstr, getattr(src, 'display_name', ''), tmp, log)
@@ -655,7 +656,7 @@ class Game:
                 secs.append((s, xs[s]))
         out_files.insert(0, (lvl, 0, 'all', xbox.format_list(secs)))
         if dropped:
-            log('  %s: прибрано %d посилань на Xbox-ресурси (%s ...)' % (lvl, len(dropped), ', '.join(dropped[:4])))
+            log(_('  %s: dropped %d references to Xbox-only resources (%s ...)', lvl, len(dropped), ', '.join(dropped[:4])))
         manifest = {'class': lvl, 'title': title, 'source': 'Xbox 360: %s' % source_name if source_name else 'Xbox 360',
                     'entry': entry, 'strings': strings, 'loading': loading}
         return Bundle.write(out_path, manifest, out_files)
@@ -665,11 +666,11 @@ class Game:
         for m in self.library()['maps']:
             if m['class'].lower() == cls.lower():
                 shutil.copy2(os.path.join(self.lib_dir, m['file']), out_path)
-                log('Експортовано %s -> %s' % (cls, out_path))
+                log(_('Exported %s -> %s', cls, out_path))
                 return out_path
         om = [m for m in self.orig_maps if m['class'].lower() == cls.lower()]
         if not om:
-            raise MapToolError('невідома карта %s' % cls)
+            raise MapToolError(_('unknown map %s', cls))
         m = om[0]
         cls = m['class']
         pd = dict(m['props'])
@@ -686,7 +687,7 @@ class Game:
         files = []
         lst = self.orig['main'].get(cls, 0)
         if lst is None:
-            raise MapToolError('%s не має списку передзавантаження' % cls)
+            raise MapToolError(_('%s has no preload list', cls))
         main_list = self.read_orig('main', lst)
         files.append((cls, 0, 'all', main_list))
         for arc in ('nv', 'ati'):
@@ -708,7 +709,7 @@ class Game:
         manifest = {'class': cls, 'title': unquote(pd.get('friendlyName', cls)), 'source': 'TimeShift PC (original map)',
                     'entry': entry, 'strings': strings, 'loading': loading, 'requires': 'TimeShift PC base game assets'}
         Bundle.write(out_path, manifest, [(n, t, a, d) for n, t, a, d in files])
-        log('Експортовано %s -> %s (%d файлів)' % (cls, out_path, len(files)))
+        log(_('Exported %s -> %s (%d files)', cls, out_path, len(files)))
         return out_path
 
     # ---- remove / hide
@@ -722,24 +723,24 @@ class Game:
                     os.remove(os.path.join(self.lib_dir, m['file']))
                 except FileNotFoundError:
                     pass
-                log('Видалено %s' % m['class'])
+                log(_('Removed %s', m['class']))
                 return 'removed'
         if any(m['class'].lower() == cls.lower() for m in self.orig_maps if m['section'] == 'multiplayer'):
             if cls.lower() not in {h.lower() for h in lib['hidden']}:
                 lib['hidden'].append(cls)
                 self.save_library(lib)
-            log('Приховано оригінальну карту %s' % cls)
+            log(_('Hidden original map %s', cls))
             return 'hidden'
-        raise MapToolError('невідома карта %s' % cls)
+        raise MapToolError(_('unknown map %s', cls))
 
     def unhide_map(self, cls, log=_noop):
         lib = self.library()
         before = len(lib['hidden'])
         lib['hidden'] = [h for h in lib['hidden'] if h.lower() != cls.lower()]
         if len(lib['hidden']) == before:
-            raise MapToolError('%s не прихована' % cls)
+            raise MapToolError(_('%s is not hidden', cls))
         self.save_library(lib)
-        log('Повернуто оригінальну карту %s' % cls)
+        log(_('Restored original map %s', cls))
 
     # ---- apply / restore
     def game_running(self):
@@ -752,12 +753,12 @@ class Game:
 
     def apply(self, log=_noop):
         if self.game_running():
-            raise MapToolError('Спершу закрийте TimeShift')
+            raise MapToolError(_('Close TimeShift first'))
         lib = self.library()
         if not lib['maps'] and not lib['hidden']:
             self.restore(log)
             return
-        log('Збирання списку карт ...')
+        log(_('Building the map list ...'))
         ps = PsContainer(self.orig_ps)
         fi = ps.find(b'gs_map_list {')
         text = strip_dev_block(ps.text(fi))
@@ -772,10 +773,10 @@ class Game:
         check = {m['class'] for m in parse_maps(text)}
         missing = [b.cls for _, b in bundles if b.cls not in check]
         if missing:
-            raise MapToolError('перевірка списку карт не пройшла для %s' % missing)
+            raise MapToolError(_('map list check failed for %s', missing))
         ps.set_text(fi, text)
         replace = {('ps', 2): ps.build()}
-        log('Додавання рядків локалізації ...')
+        log(_('Adding strings ...'))
         for lang in LANGS:
             s = self.orig_strings(lang)
             add = []
@@ -790,7 +791,7 @@ class Game:
         extra = {k: [] for k in ARCS}
         seen = set()
         for m, b in bundles:
-            log('Пакування %s ...' % b.cls)
+            log(_('Packing %s ...', b.cls))
             for f, data in b.files():
                 arcs = list(ARCS) if f['arc'] == 'all' else [f['arc']]
                 for arc in arcs:
@@ -802,12 +803,12 @@ class Game:
         tmps = {}
         try:
             for arc, fn in ARCS.items():
-                log('Запис %s ...' % fn)
+                log(_('Writing %s ...', fn))
                 tmp = os.path.join(self.paks, fn + '.tmp')
                 s3darc.write_archive(self.orig[arc], tmp, replace=replace if arc == 'main' else None,
                                      insert_after_type0=lists[arc], append=extra[arc])
                 tmps[fn] = tmp
-            log('Перевірка ...')
+            log(_('Verifying ...'))
             for tmp in tmps.values():
                 s3darc.verify_archive(tmp)
             for fn, tmp in tmps.items():
@@ -820,16 +821,16 @@ class Game:
                 except OSError:
                     pass
         self._write_applied(lib)
-        log('Готово: додано карт %d, приховано %d' % (len(lib['maps']), len(lib['hidden'])))
+        log(_('Done: %d maps added, %d hidden', len(lib['maps']), len(lib['hidden'])))
 
     def restore(self, log=_noop):
         if self.game_running():
-            raise MapToolError('Спершу закрийте TimeShift')
+            raise MapToolError(_('Close TimeShift first'))
         self.ensure_backup(log)
         for fn in ARCS.values():
             shutil.copy2(os.path.join(self.backup, fn), os.path.join(self.paks, fn))
         self._write_applied({'maps': [], 'hidden': []})
-        log('Оригінальні архіви відновлено')
+        log(_('Original archives restored'))
 
     def _write_applied(self, lib):
         with open(self.applied_file, 'w', encoding='utf-8') as f:
@@ -839,18 +840,18 @@ class Game:
     def verify(self, log=_noop):
         for fn in ARCS.values():
             n = s3darc.verify_archive(os.path.join(self.paks, fn))
-            log('%s: OK (перевірено записів: %d)' % (fn, n))
+            log(_('%s: OK (%d entries checked)', fn, n))
         a = s3darc.Archive(os.path.join(self.paks, ARCS['main']))
         try:
             ps = PsContainer(a.read(a.get('ps', 2), base_dir=self.paks))
             for i in range(len(ps.recs)):
                 if sum(v for _, v in ps.recs[i][1]) != len(zlib.decompress(ps.streams[i])):
-                    raise MapToolError('файл ps %d пошкоджено' % i)
+                    raise MapToolError(_('ps file %d is inconsistent', i))
             maps = parse_maps(ps.text(ps.find(b'gs_map_list {')))
         finally:
             a.close()
         mp = [m for m in maps if m['section'] == 'multiplayer']
-        log('Список карт: мультиплеєрних карт у грі: %d' % len(mp))
+        log(_('Map list: %d multiplayer maps installed', len(mp)))
         return mp
 
 
