@@ -1,0 +1,10 @@
+# user data: installed maps (DLC content) and their state
+library/
+*.tsmap
+
+# machine-specific game path
+config.json
+
+# python
+__pycache__/
+*.pyc
