@@ -39,6 +39,7 @@ Close the game before making changes.
 | Check the game archives | — | `maptool.py verify` |
 | Edit object scripts and properties | **Scripts** tab | — |
 | Add bots and vehicles | **Bots and vehicles** tab | — |
+| Top view of a level with all its objects | **Scripts** tab, **Map** button | — |
 
 `<level>` is the internal map name, e.g. `dlc1_multiplayer13` or `multiplayer2` (the **Level** column).
 Import, remove and unhide are applied to the game right away (use `--no-apply` on the command line to batch them).
@@ -105,6 +106,33 @@ end
 - **Limits.** Latin characters only (the text is stored as 8-bit). Existing objects can be changed, new
   ones cannot be added. For online play every player needs the same edited levels.
 
+### Level map
+
+The **Map** button shows the map selected on the **Scripts** tab from above.
+
+- **Geometry.** The level's triangles are coloured by height, from blue (low) to light (high). The sky,
+  player clip walls, AI helper meshes and transparent surfaces are left out.
+- **Height cut.** Hides everything that lies entirely above the given height, which shows rooms under roofs
+  and single floors. It starts 3 m above the highest start point or pickup.
+- **Objects.** Start points, pickups (weapons included), vehicles, objects and zones with their outlines.
+  Layers can be switched on and off; effects, sounds and lights are hidden by default.
+- **Link to the list.** Clicking an object on the map selects its text in the **Scripts** list (the list
+  filters are cleared when they hide it). Selecting an object in the list marks it on the map.
+- **Controls.** The wheel zooms, dragging or WASD / arrows (Shift: faster) move the map, **Fit** goes back
+  to the whole map. The bottom line
+  shows X, Y, Z under the cursor (Y is the height of the surface). Right click copies them to the clipboard,
+  ready to paste as a position on the **Bots and vehicles** tab.
+- **3D.** The **3D** switch shows the level in perspective. Dragging rotates the camera, Shift+drag or the
+  middle button moves it, the wheel zooms, a double click makes the point under the cursor the centre of
+  rotation. WASD / arrows move the camera forward, back and sideways relative to where it looks, Q / E down
+  and up, Shift three times faster. The keys work with any keyboard layout. The height cut, layers, object selection and coordinates work the same way. Markers hidden
+  behind walls are drawn as outlines. The renderer is pure Python: while the camera moves a simplified
+  model is shown (the 12 000 largest triangles, about 8 frames per second), and the full frame appears half
+  a second to a second after it stops. Triangles are drawn from far to near, so here and there a far surface
+  can cover a nearer one.
+
+X points right and Z up. Whether this matches the game or is mirrored has not been checked yet.
+
 ## Bots and vehicles
 
 The **Bots and vehicles** tab adds enemies and vehicles to a multiplayer map. Such maps have no spawners,
@@ -166,11 +194,13 @@ TSMapTool\
   maptool.py           command line
   maptool_scripts.py   Scripts tab
   maptool_spawn.py     Bots and vehicles tab
+  maptool_mapview.py   Map window (2D and 3D)
   tsmap\s3darc.py      .s3darc archive reader / writer
   tsmap\xbox.py        Xbox 360 STFS, .s3dpak/.s3dlst, textures
   tsmap\core.py        map library, import / export, archive rebuild
   tsmap\lg.py          .lg levels: object property texts and scripts
   tsmap\spawn.py       bots and vehicles: object conversion, resources for the preload list
+  tsmap\mapview.py     top and 3D view of a level: geometry, object positions
   tsmap\i18n.py        interface localization (English strings + Ukrainian table)
   docs\scripts.md      level scripting reference (Ukrainian)
   library\             added maps (*.tsmap, library.json, overrides\) — not in the repository

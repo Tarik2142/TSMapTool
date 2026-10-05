@@ -6,6 +6,7 @@ from tkinter import messagebox, ttk
 
 from tsmap import MapToolError, _
 from tsmap.lg import LevelFile, check_script
+from maptool_mapview import MapWindow
 
 KEYWORDS = r'\b(override|func|if|else|end|return|var|not|and|or|true|false|while|for)\b'
 SECTION_NAMES = {'scene': 'scene', 'templates': 'templates', 'effects': 'effects', 'other': 'other'}
@@ -23,6 +24,7 @@ class ScriptsTab(ttk.Frame):
         self.map_rows = []
         self.saved_edited = False
         self._hl_job = None
+        self.map_win = None        # MapWindow when open
         self._build()
 
     # ------------------------------------------------------------------ layout
@@ -42,6 +44,7 @@ class ScriptsTab(ttk.Frame):
         e = ttk.Entry(bar, textvariable=self.search_var, width=22)
         e.pack(side='left')
         e.bind('<KeyRelease>', lambda ev: self._fill_objects())
+        ttk.Button(bar, text=_('Map'), command=self._open_map).pack(side='left', padx=(12, 0))
         self.state_var = tk.StringVar()
         ttk.Label(bar, textvariable=self.state_var, foreground='#b05000').pack(side='right')
 
@@ -203,6 +206,8 @@ class ScriptsTab(ttk.Frame):
         self._fill_objects()
         self._update_state()
         self.app._say(_('%s: %d objects with properties, %d with scripts', cls, len(level.objects), n))
+        if self._map_open():
+            self.map_win.set_level(cls, level)
 
     def _load_failed(self, cls, msg):
         self.state_var.set('')
@@ -253,6 +258,33 @@ class ScriptsTab(ttk.Frame):
         o = self.level.objects[idx]
         self.obj_var.set('%s   (%s, %s)' % (o.name, o.template or '—', _(SECTION_NAMES.get(o.section, o.section))))
         self._set_text(self.edits.get(idx, o.text).replace('\r\n', '\n'), editable=True)
+        if self._map_open():
+            self.map_win.highlight_text(idx)
+
+    # ------------------------------------------------------------------ map window
+    def _map_open(self):
+        return self.map_win is not None and self.map_win.winfo_exists()
+
+    def _open_map(self):
+        if not self.level:
+            messagebox.showinfo(_('Map'), _('Select a map first'))
+            return
+        if self._map_open():
+            self.map_win.lift()
+            return
+        self.map_win = MapWindow(self)
+        self.map_win.set_level(self.cls, self.level)
+        if self.current is not None:
+            self.map_win.highlight_text(self.current)
+
+    def show_object(self, idx):
+        """An object was clicked on the map: select it in the list (the filters are cleared when they hide it)."""
+        if not self.tree.exists(str(idx)):
+            self.only_scripts.set(False)
+            self.search_var.set('')
+            self._fill_objects()
+        self.tree.selection_set(str(idx))
+        self.tree.see(str(idx))
 
     def _store_current(self):
         """Keep the editor content of the current object in self.edits."""

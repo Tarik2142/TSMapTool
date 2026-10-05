@@ -228,6 +228,37 @@ UK = {
     'Select an added object (marked orange)': 'Виберіть доданий об\'єкт (позначено помаранчевим)',
     '%s: %s restored': '%s: %s повернуто',
     '%s: %d resources added to the preload list': '%s: до списку передзавантаження додано ресурсів: %d',
+    # map window
+    'Map': 'Карта',
+    'Select a map first': 'Спершу виберіть карту',
+    'Height cut:': 'Зріз за висотою:',
+    'none': 'немає',
+    'Start points and pickups': 'Точки появи й предмети',
+    'Objects': 'Об\'єкти',
+    'Lights': 'Світло',
+    'Effects and sounds': 'Ефекти й звуки',
+    'effect': 'ефект',
+    'Names': 'Імена',
+    'Fit': 'Уся карта',
+    'start point': 'точка появи',
+    'object': 'об\'єкт',
+    'scene object': 'об\'єкт сцени',
+    'zone': 'зона',
+    'sound': 'звук',
+    'light': 'світло',
+    'Drag: rotate, Shift+drag or middle button: move, wheel: zoom, double click: rotate around that point, '
+    'right click: copy coordinates':
+        'Перетягування: обертання, Shift+перетягування чи середня кнопка: зсув, колесо: масштаб, подвійний клік: '
+        'обертати навколо цієї точки, правий клік: копіювати координати',
+    'WASD / arrows: move, Q / E: down / up, Shift: faster':
+        'WASD / стрілки: рух, Q / E: вниз / вгору, Shift: швидше',
+    'Wheel: zoom, drag: move, right click: copy coordinates':
+        'Колесо: масштаб, перетягування: зсув, правий клік: копіювати координати',
+    'WASD / arrows: move, Shift: faster': 'WASD / стрілки: рух, Shift: швидше',
+    '%s: %d triangles, %d objects': '%s: трикутників %d, об\'єктів %d',
+    'click: show in the list': 'клік: показати в списку',
+    'This object has no position on the map': 'Цей об\'єкт не має позиції на карті',
+    'Copied: %s': 'Скопійовано: %s',
 }
 
 TABLES = {'uk': UK}
