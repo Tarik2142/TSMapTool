@@ -4,6 +4,7 @@ The game archives are always rebuilt from the original archives (backup) plus ev
 the library, so removing a map never leaves garbage behind and "restore" is a plain copy.
 """
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -14,7 +15,7 @@ import subprocess
 import zipfile
 import zlib
 
-from . import s3darc, xbox
+from . import lg, s3darc, xbox
 from .i18n import _
 
 LANGS = ['czech', 'english', 'french', 'german', 'hungarian', 'italian', 'polish', 'russian', 'spanish']
@@ -54,16 +55,16 @@ class PsContainer:
     """
 
     def __init__(self, data):
-        cnt, self.total_blocks, _ = struct.unpack('<3I', data[:12])
+        cnt, self.total_blocks, _total = struct.unpack('<3I', data[:12])
         p = 12
         self.recs = []
-        for _ in range(cnt):
+        for _i in range(cnt):
             cs, n = struct.unpack('<II', data[p:p + 8])
             tab = [list(struct.unpack('<QI', data[p + 8 + 12 * k:p + 20 + 12 * k])) for k in range(n)]
             self.recs.append([cs, tab])
             p += 8 + 12 * n
         self.streams = []
-        for cs, _ in self.recs:
+        for cs, _tab in self.recs:
             self.streams.append(data[p:p + cs])
             p += cs
         if p != len(data):
@@ -146,7 +147,7 @@ def strip_dev_block(text):
     if a < 0:
         return text
     p = a
-    for _ in range(3):
+    for _i in range(3):
         p = text.index('#endif', p) + 6
     p = text.index('\n', p) + 1
     return text[:a] + text[p:]
@@ -158,10 +159,10 @@ def parse_maps(text):
     maps_blk = [b for b in bl if b[0] == 'maps' and b[4] == 1]
     if not maps_blk:
         raise MapToolError(_('gs_map_list: maps section not found'))
-    _, _, mo, mc, _ = maps_blk[0]
+    mo, mc = maps_blk[0][2], maps_blk[0][3]
     sections = [b for b in bl if b[4] == 2 and mo < b[2] < mc]
     out = []
-    for sname, _, so, sc, _ in sections:
+    for sname, _np, so, sc, _dp in sections:
         for name, npos, op, cl, depth in bl:
             if depth != 3 or not so < op < sc:
                 continue
@@ -185,7 +186,7 @@ def parse_maps(text):
 
 def section_close_line(text, section):
     bl = _blocks(text)
-    for name, _, op, cl, depth in bl:
+    for name, _np, op, cl, depth in bl:
         if name == section and depth == 2:
             return text.rfind('\n', 0, cl) + 1
     raise MapToolError(_('gs_map_list: section %s not found', section))
@@ -414,6 +415,7 @@ class Game:
             lib = {}
         lib.setdefault('maps', [])
         lib.setdefault('hidden', [])
+        lib.setdefault('overrides', [])     # edited level files: {level, name, type, file, sha1, time[, arcs]}
         return lib
 
     def save_library(self, lib):
@@ -436,7 +438,109 @@ class Game:
         lib = self.library()
         ap = self.applied()
         return ([(m['class'], m['id']) for m in lib['maps']] != [tuple(x) for x in ap.get('maps', [])]
-                or sorted(lib['hidden']) != sorted(ap.get('hidden', [])))
+                or sorted(lib['hidden']) != sorted(ap.get('hidden', []))
+                or sorted([o['name'], o['sha1']] for o in lib['overrides']) != sorted(ap.get('overrides', [])))
+
+    # ---- edited level files (scripts / object properties)
+    def level_override(self, cls):
+        for o in self.library()['overrides']:
+            if o['level'].lower() == cls.lower() and o['type'] == 16:
+                return o
+        return None
+
+    def override_data(self, name, type, arc='main'):
+        """Edited data of an archive entry, or None."""
+        for o in self.library()['overrides']:
+            if o['name'].lower() == name.lower() and o['type'] == type and arc in o.get('arcs', ['main']):
+                with open(os.path.join(self.lib_dir, o['file']), 'rb') as f:
+                    return f.read()
+        return None
+
+    def level_data(self, cls, original=False):
+        """Current .lg of a map: the edited copy if there is one, else the one from the library / game."""
+        if not original:
+            o = self.level_override(cls)
+            if o:
+                with open(os.path.join(self.lib_dir, o['file']), 'rb') as f:
+                    return f.read()
+        name = cls + '.lg'
+        for m in self.library()['maps']:
+            if m['class'].lower() == cls.lower():
+                for f, data in self.bundle(m).files():
+                    if f['name'].lower() == name.lower() and f['type'] == 16:
+                        return data
+                raise MapToolError(_('%s has no level file', cls))
+        e = self.orig['main'].get(name, 16)
+        if e is None:
+            raise MapToolError(_('%s has no level file', cls))
+        return self.read_orig('main', e)
+
+    def save_level_override(self, cls, data, log=_noop):
+        self.save_override(cls, cls + '.lg', 16, data, log=log)
+
+    def save_override(self, cls, name, type, data, arcs=('main',), log=_noop):
+        """Replace an archive entry of a map (its level, preload list ...) in the given archives."""
+        lib = self.library()
+        lib['overrides'] = [o for o in lib['overrides']
+                            if not (o['name'].lower() == name.lower() and o['type'] == type)]
+        rel = 'overrides/' + re.sub(r'[^\w.-]', '_', name) + ('' if type == 16 else '.type%d' % type)
+        os.makedirs(os.path.join(self.lib_dir, 'overrides'), exist_ok=True)
+        tmp = os.path.join(self.lib_dir, rel + '.tmp')
+        with open(tmp, 'wb') as f:
+            f.write(data)
+        os.replace(tmp, os.path.join(self.lib_dir, rel))
+        o = {'level': cls, 'name': name, 'type': type, 'file': rel, 'sha1': hashlib.sha1(data).hexdigest(),
+             'time': datetime.datetime.now().isoformat(timespec='seconds')}
+        if list(arcs) != ['main']:
+            o['arcs'] = list(arcs)
+        lib['overrides'].append(o)
+        self.save_library(lib)
+        log(_('Saved the edited level %s', cls))
+
+    def drop_level_override(self, cls, log=_noop):
+        lib = self.library()
+        keep, drop = [], []
+        for o in lib['overrides']:
+            (drop if o['level'].lower() == cls.lower() else keep).append(o)
+        if not drop:
+            return False
+        lib['overrides'] = keep
+        self.save_library(lib)
+        for o in drop:
+            try:
+                os.remove(os.path.join(self.lib_dir, o['file']))
+            except FileNotFoundError:
+                pass
+        log(_('Restored the original level %s', cls))
+        return True
+
+    def script_functions(self):
+        """Built-in script functions (signatures) read from the game executable, cached per exe."""
+        def load():
+            cache = os.path.join(self.lib_dir, 'functions.json')
+            exes = [os.path.join(self.dir, 'bin', f) for f in os.listdir(os.path.join(self.dir, 'bin'))
+                    if f.lower().endswith('.exe')]
+            exes.sort(key=lambda p: ('fixed' not in p.lower(), 'dev' in p.lower(), -os.path.getsize(p)))
+            if not exes:
+                return []
+            exe = exes[0]
+            key = [os.path.basename(exe), os.path.getsize(exe), int(os.path.getmtime(exe))]
+            try:
+                with open(cache, encoding='utf-8') as f:
+                    c = json.load(f)
+                if c.get('exe') == key:
+                    return c['functions']
+            except (OSError, ValueError):
+                pass
+            with open(exe, 'rb') as f:
+                funcs = lg.script_functions(f.read())
+            try:
+                with open(cache, 'w', encoding='utf-8') as f:
+                    json.dump({'exe': key, 'functions': funcs}, f, indent=0)
+            except OSError:
+                pass
+            return funcs
+        return self.cached('functions', load)
 
     def all_classes(self):
         return {m['class'].lower() for m in self.orig_maps} | {m['class'].lower() for m in self.library()['maps']}
@@ -499,6 +603,9 @@ class Game:
                          'name': unquote(st.get(unquote(pd.get('nameId', '')), '')),
                          'modes': modes_of(entry), 'players': '%s-%s' % (pd.get('minPlayers', '?'), pd.get('maxPlayers', '?')),
                          'kind': 'custom', 'props': [tuple(x) for x in entry], 'source': m.get('source', '')})
+        edited = {o['level'].lower() for o in lib['overrides']}
+        for r in rows:
+            r['edited'] = r['class'].lower() in edited
         rows.sort(key=lambda r: r['id'])
         return rows
 
@@ -665,7 +772,15 @@ class Game:
     def export_map(self, cls, out_path, log=_noop):
         for m in self.library()['maps']:
             if m['class'].lower() == cls.lower():
-                shutil.copy2(os.path.join(self.lib_dir, m['file']), out_path)
+                if not any(o['level'].lower() == cls.lower() for o in self.library()['overrides']):
+                    shutil.copy2(os.path.join(self.lib_dir, m['file']), out_path)
+                else:                                   # export with the edited entries
+                    b = self.bundle(m)
+                    files = []
+                    for f, data in b.files():
+                        edited = self.override_data(f['name'], f['type'], 'main' if f['arc'] == 'all' else f['arc'])
+                        files.append((f['name'], f['type'], f['arc'], data if edited is None else edited))
+                    Bundle.write(out_path, {k: v for k, v in b.manifest.items() if k not in ('files', 'format')}, files)
                 log(_('Exported %s -> %s', cls, out_path))
                 return out_path
         om = [m for m in self.orig_maps if m['class'].lower() == cls.lower()]
@@ -688,12 +803,12 @@ class Game:
         lst = self.orig['main'].get(cls, 0)
         if lst is None:
             raise MapToolError(_('%s has no preload list', cls))
-        main_list = self.read_orig('main', lst)
+        main_list = self.override_data(cls, 0) or self.read_orig('main', lst)
         files.append((cls, 0, 'all', main_list))
         for arc in ('nv', 'ati'):
             e = self.orig[arc].get(cls, 0)
             if e is not None:
-                d = self.read_orig(arc, e)
+                d = self.override_data(cls, 0, arc) or self.read_orig(arc, e)
                 if d != main_list:       # vendor list differs: store it separately
                     files[0] = (cls, 0, 'main', main_list)
                     files.append((cls, 0, arc, d))
@@ -705,7 +820,8 @@ class Game:
             if (low in {n.lower() for n in names}
                     or (e.type == 6 and re.match(re.escape(cls.lower()) + r'_\d+_lm', low))
                     or (e.type == 6 and loading and low in (loading, loading + '_small'))):
-                files.append((e.name, e.type, 'main', self.read_orig('main', e)))
+                data = self.level_data(cls) if (low, e.type) == ((cls + '.lg').lower(), 16) else self.read_orig('main', e)
+                files.append((e.name, e.type, 'main', data))
         manifest = {'class': cls, 'title': unquote(pd.get('friendlyName', cls)), 'source': 'TimeShift PC (original map)',
                     'entry': entry, 'strings': strings, 'loading': loading, 'requires': 'TimeShift PC base game assets'}
         Bundle.write(out_path, manifest, [(n, t, a, d) for n, t, a, d in files])
@@ -723,6 +839,7 @@ class Game:
                     os.remove(os.path.join(self.lib_dir, m['file']))
                 except FileNotFoundError:
                     pass
+                self.drop_level_override(m['class'])
                 log(_('Removed %s', m['class']))
                 return 'removed'
         if any(m['class'].lower() == cls.lower() for m in self.orig_maps if m['section'] == 'multiplayer'):
@@ -755,9 +872,15 @@ class Game:
         if self.game_running():
             raise MapToolError(_('Close TimeShift first'))
         lib = self.library()
-        if not lib['maps'] and not lib['hidden']:
+        if not lib['maps'] and not lib['hidden'] and not lib['overrides']:
             self.restore(log)
             return
+        overrides = {}      # (arc, name, type) -> data
+        for o in lib['overrides']:
+            with open(os.path.join(self.lib_dir, o['file']), 'rb') as f:
+                data = f.read()
+            for arc in o.get('arcs', ['main']):
+                overrides[(arc, o['name'].lower(), o['type'])] = data
         log(_('Building the map list ...'))
         ps = PsContainer(self.orig_ps)
         fi = ps.find(b'gs_map_list {')
@@ -775,18 +898,24 @@ class Game:
         if missing:
             raise MapToolError(_('map list check failed for %s', missing))
         ps.set_text(fi, text)
-        replace = {('ps', 2): ps.build()}
+        replace = {arc: {} for arc in ARCS}
+        replace['main'][('ps', 2)] = ps.build()
         log(_('Adding strings ...'))
         for lang in LANGS:
             s = self.orig_strings(lang)
             add = []
-            for _, b in bundles:
+            for _m, b in bundles:
                 st = b.manifest['strings'].get(lang) or b.manifest['strings'].get('english', {})
                 add += ['%s\t\t\t\t%s' % (k, v) for k, v in st.items()]
             if add:
                 if not s.endswith('\r\n'):
                     s += '\r\n'
-                replace[('strings_' + lang, 14)] = (s + '\r\n'.join(add) + '\r\n').encode('utf-16le')
+                replace['main'][('strings_' + lang, 14)] = (s + '\r\n'.join(add) + '\r\n').encode('utf-16le')
+        used = set()
+        for (arc, *key), data in overrides.items():
+            if tuple(key) in self.orig[arc].by_key:        # edited entry of an original map
+                replace[arc][tuple(key)] = data
+                used.add((arc, *key))
         lists = {k: [] for k in ARCS}
         extra = {k: [] for k in ARCS}
         seen = set()
@@ -799,13 +928,19 @@ class Game:
                     if key in seen or (f['name'].lower(), f['type']) in self.orig[arc].by_key:
                         continue
                     seen.add(key)
-                    (lists if f['type'] == 0 else extra)[arc].append((f['name'], f['type'], data))
+                    okey = (arc, f['name'].lower(), f['type'])
+                    fdata = overrides.get(okey, data)          # edited entry of an added map
+                    if okey in overrides:
+                        used.add(okey)
+                    (lists if f['type'] == 0 else extra)[arc].append((f['name'], f['type'], fdata))
+        for key in sorted({k[1] for k in set(overrides) - used}):
+            log(_('Warning: edited file %s is not used by any map', key))
         tmps = {}
         try:
             for arc, fn in ARCS.items():
                 log(_('Writing %s ...', fn))
                 tmp = os.path.join(self.paks, fn + '.tmp')
-                s3darc.write_archive(self.orig[arc], tmp, replace=replace if arc == 'main' else None,
+                s3darc.write_archive(self.orig[arc], tmp, replace=replace[arc],
                                      insert_after_type0=lists[arc], append=extra[arc])
                 tmps[fn] = tmp
             log(_('Verifying ...'))
@@ -822,6 +957,8 @@ class Game:
                     pass
         self._write_applied(lib)
         log(_('Done: %d maps added, %d hidden', len(lib['maps']), len(lib['hidden'])))
+        if lib['overrides']:
+            log(_('Edited levels: %s', ', '.join(dict.fromkeys(o['level'] for o in lib['overrides']))))
 
     def restore(self, log=_noop):
         if self.game_running():
@@ -829,12 +966,13 @@ class Game:
         self.ensure_backup(log)
         for fn in ARCS.values():
             shutil.copy2(os.path.join(self.backup, fn), os.path.join(self.paks, fn))
-        self._write_applied({'maps': [], 'hidden': []})
+        self._write_applied({'maps': [], 'hidden': [], 'overrides': []})
         log(_('Original archives restored'))
 
     def _write_applied(self, lib):
         with open(self.applied_file, 'w', encoding='utf-8') as f:
             json.dump({'maps': [[m['class'], m['id']] for m in lib['maps']], 'hidden': lib['hidden'],
+                       'overrides': sorted([o['name'], o['sha1']] for o in lib.get('overrides', [])),
                        'time': datetime.datetime.now().isoformat(timespec='seconds')}, f, indent=1)
 
     def verify(self, log=_noop):

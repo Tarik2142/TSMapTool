@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tsmap import (LANGUAGES, MapToolError, _, find_game_dir, get_language, init_language,  # noqa: E402
                    open_game, save_config, save_game_dir, set_language)
+from maptool_scripts import ScriptsTab  # noqa: E402
 
 KIND = {'original': 'original', 'custom': 'added', 'hidden': 'hidden', 'broken': 'broken'}
 
@@ -26,6 +27,7 @@ class App(tk.Tk):
         self.details_cache = {}
         self.photo = None
         self.rows = {}
+        self.rows_list = []
         self.lock = threading.Lock()   # archive handles are shared between threads
         self._build()
         self.after(100, self._poll)
@@ -49,7 +51,11 @@ class App(tk.Tk):
         self.pending_var = tk.StringVar()
         ttk.Label(top, textvariable=self.pending_var, foreground='#b05000').pack(side='right')
 
-        bar = ttk.Frame(self, padding=8)
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill='both', expand=True, padx=8, pady=(8, 0))
+        maps_page = ttk.Frame(self.nb)
+        self.nb.add(maps_page, text=_('Maps'))
+        bar = ttk.Frame(maps_page, padding=(0, 8))
         bar.pack(fill='x')
         self.buttons = [
             ttk.Button(bar, text=_('Import file…'), command=self._import_files),
@@ -63,8 +69,8 @@ class App(tk.Tk):
         for b in self.buttons:
             b.pack(side='left', padx=(0, 6))
 
-        body = ttk.PanedWindow(self, orient='horizontal')
-        body.pack(fill='both', expand=True, padx=8)
+        body = ttk.PanedWindow(maps_page, orient='horizontal')
+        body.pack(fill='both', expand=True)
         left = ttk.Frame(body)
         body.add(left, weight=3)
         cols = ('id', 'title', 'class', 'modes', 'players', 'kind')
@@ -96,16 +102,21 @@ class App(tk.Tk):
         self.desc.pack(fill='both', expand=True, pady=(6, 0))
         self.desc.configure(state='disabled')
 
-        self.log = tk.Text(self, height=8, wrap='word', state='disabled')
+        self.scripts = ScriptsTab(self.nb, self)
+        self.nb.add(self.scripts, text=_('Scripts'))
+
+        self.log = tk.Text(self, height=7, wrap='word', state='disabled')
         self.log.pack(fill='x', padx=8, pady=8)
 
     def _change_language(self, event=None):
         code = next(c for c, n in LANGUAGES.items() if n == self.lang_var.get())
         if code == get_language():
             return
-        if self.busy:
+        if self.busy or (self.scripts.unsaved() and not messagebox.askyesno(
+                _('Scripts'), _('Discard unsaved changes in %s?', self.scripts.cls))):
             self.lang_var.set(LANGUAGES[get_language()])
             return
+        loaded, tab = self.scripts.cls, self.nb.index('current')
         set_language(code)
         save_config(lang=code)
         for w in self.winfo_children():
@@ -113,6 +124,9 @@ class App(tk.Tk):
         self.details_cache.clear()
         self._build()
         self._refresh()
+        self.nb.select(tab)
+        if loaded:
+            self.scripts.load_map(loaded)
 
     # ------------------------------------------------------------- helpers
     def _say(self, msg):
@@ -133,8 +147,8 @@ class App(tk.Tk):
             pass
         self.after(100, self._poll)
 
-    def _run(self, title, fn, refresh=True):
-        """Run fn() in a worker thread, report errors, then refresh the list."""
+    def _run(self, title, fn, refresh=True, done=None):
+        """Run fn() in a worker thread, report errors, then refresh the list; done(err) afterwards."""
         if self.busy or not self.game:
             return
         self.busy = True
@@ -151,10 +165,10 @@ class App(tk.Tk):
                 err = str(e)
             except Exception as e:  # unexpected: show it instead of dying silently
                 err = '%s: %s' % (type(e).__name__, e)
-            self.msgs.put(('call', lambda: self._done(err, refresh)))
+            self.msgs.put(('call', lambda: self._done(err, refresh, done)))
         threading.Thread(target=work, daemon=True).start()
 
-    def _done(self, err, refresh):
+    def _done(self, err, refresh, done=None):
         self.busy = False
         for b in self.buttons:
             b.state(['!disabled'])
@@ -164,6 +178,8 @@ class App(tk.Tk):
         if refresh:
             self.details_cache.clear()
             self._refresh()
+        if done:
+            done(err)
 
     def _selected(self):
         return [self.tree.item(i, 'values')[2] for i in self.tree.selection()]
@@ -207,11 +223,14 @@ class App(tk.Tk):
             return
         self.tree.delete(*self.tree.get_children())
         for r in rows:
+            state = _(KIND.get(r['kind'], r['kind'])) + ('  ✎' if r.get('edited') else '')
             iid = self.tree.insert('', 'end', values=(r['id'], r['title'], r['class'], ' '.join(r['modes']),
-                                                     r['players'], _(KIND.get(r['kind'], r['kind']))), tags=(r['kind'],))
+                                                     r['players'], state), tags=(r['kind'],))
             if r['class'] in sel:
                 self.tree.selection_add(iid)
         self.rows = {r['class']: r for r in rows}
+        self.rows_list = rows
+        self.scripts.refresh_maps(rows)
         self.pending_var.set(_('There are unapplied changes — press «Apply»') if pending else '')
 
     # ------------------------------------------------------------- details
