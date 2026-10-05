@@ -38,6 +38,7 @@ Close the game before making changes.
 | Put the original archives back | **Restore original game** | `maptool.py restore` |
 | Check the game archives | — | `maptool.py verify` |
 | Edit object scripts and properties | **Scripts** tab | — |
+| Add bots and vehicles | **Bots and vehicles** tab | — |
 
 `<level>` is the internal map name, e.g. `dlc1_multiplayer13` or `multiplayer2` (the **Level** column).
 Import, remove and unhide are applied to the game right away (use `--no-apply` on the command line to batch them).
@@ -104,6 +105,26 @@ end
 - **Limits.** Latin characters only (the text is stored as 8-bit). Existing objects can be changed, new
   ones cannot be added. For online play every player needs the same edited levels.
 
+## Bots and vehicles
+
+The **Bots and vehicles** tab adds enemies and vehicles to a multiplayer map. Such maps have no spawners,
+so the tool converts spare objects of the map:
+
+- **Bots.** A sound zone becomes a soldier spawner. Soldiers appear at random places of the zone when a
+  player enters it, and stand and shoot. Soldiers, weapons, how many at once and the delay after a kill
+  can be chosen. They cannot run around: that needs navigation the multiplayer maps do not have.
+- **Vehicle spawner.** A sound zone creates a vehicle 2 s after the start and again a set time after it
+  is destroyed.
+- **Vehicle.** A pickup (energy, grenades ...) becomes a vehicle at the same place or at a given point.
+
+A zone with 4 corners can be moved anywhere; the coordinates can be taken from the player start points
+(`start_pos*`) or from pickups. The tool adds the resources needed (templates, textures, sounds) to the
+map's preload list, because the game creates only what is listed there. The bike (`bike`) is checked,
+the other vehicles are marked as not tested. Added objects are shown in orange, **Undo** restores the
+selected one. Internals are described in [docs/scripts.md](docs/scripts.md) (in Ukrainian).
+
+Checked only with the level loaded in single player from the developer menu.
+
 ## Online play
 
 All players need the same maps with the same ids. The simplest way is to share the three files
@@ -144,10 +165,12 @@ TSMapTool\
   maptool_gui.pyw      GUI
   maptool.py           command line
   maptool_scripts.py   Scripts tab
+  maptool_spawn.py     Bots and vehicles tab
   tsmap\s3darc.py      .s3darc archive reader / writer
   tsmap\xbox.py        Xbox 360 STFS, .s3dpak/.s3dlst, textures
   tsmap\core.py        map library, import / export, archive rebuild
   tsmap\lg.py          .lg levels: object property texts and scripts
+  tsmap\spawn.py       bots and vehicles: object conversion, resources for the preload list
   tsmap\i18n.py        interface localization (English strings + Ukrainian table)
   docs\scripts.md      level scripting reference (Ukrainian)
   library\             added maps (*.tsmap, library.json, overrides\) — not in the repository

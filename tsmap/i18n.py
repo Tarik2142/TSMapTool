@@ -177,6 +177,57 @@ UK = {
     'Restored the original level %s': 'Повернуто оригінальний рівень %s',
     'Warning: edited file %s is not used by any map': 'Увага: змінений файл %s не використовується жодною картою',
     'Edited levels: %s': 'Змінені рівні: %s',
+    # bots and vehicles
+    'Bots and vehicles': 'Боти й техніка',
+    'A spare sound zone becomes a spawner, a pickup becomes a vehicle. Soldiers appear at random places of '
+    'their zone when a player enters it and stand and shoot (moving needs navigation the multiplayer maps '
+    'do not have). A vehicle spawner creates the vehicle 2 s after the start and again after it is '
+    'destroyed. The resources are added to the map\'s preload list. Checked in single player (developer '
+    'menu) only.':
+        'Непотрібна звукова зона стає спавнером, предмет для підбирання — технікою. Солдати з\'являються у '
+        'випадкових місцях своєї зони, коли гравець заходить у неї, і стоять та стріляють (щоб бігати, потрібна '
+        'навігація, якої на мультиплеєрних картах немає). Спавнер техніки створює її через 2 с після старту і '
+        'знову після знищення. Потрібні ресурси дописуються в список передзавантаження карти. Перевірено лише в '
+        'одиночній грі (меню розробника).',
+    '%s: %d spare zones, %d pickups': '%s: вільних зон %d, предметів %d',
+    'What': 'Що це',
+    'Position': 'Позиція',
+    'Size': 'Розмір',
+    'size': 'розмір',
+    'Zones': 'Зони',
+    'Pickups': 'Предмети',
+    'sound zone': 'звукова зона',
+    'bots': 'боти',
+    'vehicle spawner': 'спавнер техніки',
+    'pickup': 'предмет',
+    'vehicle': 'техніка',
+    'Select a zone or a pickup': 'Виберіть зону або предмет',
+    'Make:': 'Зробити:',
+    'Bots': 'Боти',
+    'Vehicle spawner': 'Спавнер техніки',
+    'Vehicle': 'Техніка',
+    'Vehicle:': 'Техніка:',
+    'not tested': 'не перевірено',
+    'Soldiers:': 'Солдати:',
+    'Weapons:': 'Зброя:',
+    'At once:': 'Одночасно:',
+    'Next one after a kill, s:': 'Новий після вбивства, с:',
+    'Respawn after destruction, s:': 'Поява після знищення, с:',
+    'Move to': 'Перенести в',
+    'Take from:': 'Взяти з:',
+    'This zone has more than 4 corners and stays where it is.': 'Ця зона має понад 4 кути й лишається на місці.',
+    'The zone becomes a square of this size on the floor at Y. Bots appear inside it when a player enters it.':
+        'Зона стане квадратом такого розміру на підлозі на висоті Y. Боти з\'являються в ній, коли туди заходить гравець.',
+    'By default the vehicle stands where the pickup was.': 'Без перенесення техніка стоїть там, де був предмет.',
+    'Position: numbers expected': 'Позиція: потрібні числа',
+    'Choose at least one soldier and one weapon': 'Виберіть хоча б одного солдата й одну зброю',
+    'Add / change': 'Додати / змінити',
+    'Undo': 'Скасувати',
+    'Added: %d': 'Додано: %d',
+    '%s: %s → %s': '%s: %s → %s',
+    'Select an added object (marked orange)': 'Виберіть доданий об\'єкт (позначено помаранчевим)',
+    '%s: %s restored': '%s: %s повернуто',
+    '%s: %d resources added to the preload list': '%s: до списку передзавантаження додано ресурсів: %d',
 }
 
 TABLES = {'uk': UK}

@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tsmap import (LANGUAGES, MapToolError, _, find_game_dir, get_language, init_language,  # noqa: E402
                    open_game, save_config, save_game_dir, set_language)
 from maptool_scripts import ScriptsTab  # noqa: E402
+from maptool_spawn import SpawnTab  # noqa: E402
 
 KIND = {'original': 'original', 'custom': 'added', 'hidden': 'hidden', 'broken': 'broken'}
 
@@ -104,6 +105,8 @@ class App(tk.Tk):
 
         self.scripts = ScriptsTab(self.nb, self)
         self.nb.add(self.scripts, text=_('Scripts'))
+        self.spawn = SpawnTab(self.nb, self)
+        self.nb.add(self.spawn, text=_('Bots and vehicles'))
 
         self.log = tk.Text(self, height=7, wrap='word', state='disabled')
         self.log.pack(fill='x', padx=8, pady=8)
@@ -116,7 +119,7 @@ class App(tk.Tk):
                 _('Scripts'), _('Discard unsaved changes in %s?', self.scripts.cls))):
             self.lang_var.set(LANGUAGES[get_language()])
             return
-        loaded, tab = self.scripts.cls, self.nb.index('current')
+        loaded, tab, spawn_loaded = self.scripts.cls, self.nb.index('current'), self.spawn.cls
         set_language(code)
         save_config(lang=code)
         for w in self.winfo_children():
@@ -127,6 +130,8 @@ class App(tk.Tk):
         self.nb.select(tab)
         if loaded:
             self.scripts.load_map(loaded)
+        if spawn_loaded:
+            self.spawn.load_map(spawn_loaded)
 
     # ------------------------------------------------------------- helpers
     def _say(self, msg):
@@ -231,6 +236,7 @@ class App(tk.Tk):
         self.rows = {r['class']: r for r in rows}
         self.rows_list = rows
         self.scripts.refresh_maps(rows)
+        self.spawn.refresh_maps(rows)
         self.pending_var.set(_('There are unapplied changes — press «Apply»') if pending else '')
 
     # ------------------------------------------------------------- details

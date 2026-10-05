@@ -476,14 +476,26 @@ class Game:
         return self.read_orig('main', e)
 
     def save_level_override(self, cls, data, log=_noop):
-        self.save_override(cls, cls + '.lg', 16, data, log=log)
+        self.save_override(cls, cls + '.lg', 16, data)
+        log(_('Saved the edited level %s', cls))
 
-    def save_override(self, cls, name, type, data, arcs=('main',), log=_noop):
+    def save_override(self, cls, name, type, data, arcs=('main',)):
         """Replace an archive entry of a map (its level, preload list ...) in the given archives."""
         lib = self.library()
-        lib['overrides'] = [o for o in lib['overrides']
-                            if not (o['name'].lower() == name.lower() and o['type'] == type)]
+        arcs = list(arcs)
+        keep, dropped = [], []
+        for o in lib['overrides']:
+            if o['name'].lower() == name.lower() and o['type'] == type:
+                rest = [a for a in o.get('arcs', ['main']) if a not in arcs]
+                if not rest:
+                    dropped.append(o['file'])
+                    continue
+                o['arcs'] = rest            # still used by the other archives
+            keep.append(o)
+        lib['overrides'] = keep
         rel = 'overrides/' + re.sub(r'[^\w.-]', '_', name) + ('' if type == 16 else '.type%d' % type)
+        if arcs != ['main']:
+            rel += '.' + '_'.join(arcs)
         os.makedirs(os.path.join(self.lib_dir, 'overrides'), exist_ok=True)
         tmp = os.path.join(self.lib_dir, rel + '.tmp')
         with open(tmp, 'wb') as f:
@@ -491,11 +503,38 @@ class Game:
         os.replace(tmp, os.path.join(self.lib_dir, rel))
         o = {'level': cls, 'name': name, 'type': type, 'file': rel, 'sha1': hashlib.sha1(data).hexdigest(),
              'time': datetime.datetime.now().isoformat(timespec='seconds')}
-        if list(arcs) != ['main']:
-            o['arcs'] = list(arcs)
+        if arcs != ['main']:
+            o['arcs'] = arcs
         lib['overrides'].append(o)
         self.save_library(lib)
-        log(_('Saved the edited level %s', cls))
+        for f in dropped:
+            if f != rel:
+                try:
+                    os.remove(os.path.join(self.lib_dir, f))
+                except FileNotFoundError:
+                    pass
+
+    def map_list_data(self, cls, arc='main'):
+        """Current preload list of a map in one archive: edited, from the library or from the game."""
+        data = self.override_data(cls, 0, arc)
+        if data is not None:
+            return data
+        for m in self.library()['maps']:
+            if m['class'].lower() == cls.lower():
+                for f, d in self.bundle(m).files():
+                    if f['type'] == 0 and f['name'].lower() == cls.lower() and f['arc'] in ('all', arc):
+                        return d
+                return None
+        e = self.orig[arc].get(cls, 0)
+        return None if e is None else self.read_orig(arc, e)
+
+    def save_map_lists(self, cls, lists):
+        """{arc: preload list data} -> overrides; archives with the same list share one file."""
+        groups = {}
+        for arc, data in lists.items():
+            groups.setdefault(data, []).append(arc)
+        for data, arcs in groups.items():
+            self.save_override(cls, cls, 0, data, arcs=[a for a in ARCS if a in arcs])
 
     def drop_level_override(self, cls, log=_noop):
         lib = self.library()

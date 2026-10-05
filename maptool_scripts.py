@@ -157,6 +157,12 @@ class ScriptsTab(ttk.Frame):
         self.text.insert('insert', name + ('()' if sig.split('(', 1)[1].startswith(')') else '('))
         self.text.focus_set()
 
+    def reload_if_shown(self, cls):
+        """The level was changed elsewhere (Bots and vehicles tab): show the new one unless edits are pending."""
+        if self.cls == cls and not self.unsaved():
+            self.cls = None
+            self.load_map(cls)
+
     def unsaved(self):
         self._store_current()
         return bool(self.edits)
