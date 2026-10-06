@@ -12,6 +12,11 @@
 
 ## Запуск
 
+- **Готовий `TSMapTool.exe`:** на сторінці [Releases](https://github.com/Tarik2142/TSMapTool/releases) (Windows,
+  64 біти, Python встановлювати не треба). Покладіть його в окрему папку, наприклад `TimeShift\TSMapTool`:
+  `config.json` і бібліотека карт (`library\`) зберігаються поруч з ним. Кожен пуш у `main`, що змінює код,
+  збирає новий реліз `build-N` (`.github\workflows\release.yml`, PyInstaller); у ньому лише графічний
+  інтерфейс.
 - **Графічний інтерфейс:** `TSMapTool.bat` (або подвійний клік на `maptool_gui.pyw`).
 - **Командний рядок:** `python maptool.py <команда>`.
 

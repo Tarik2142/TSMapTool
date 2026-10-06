@@ -14,6 +14,10 @@ draws the map, a frame taking a second or two instead of hundredths and the 3D v
 
 ## Running
 
+- **Ready-made `TSMapTool.exe`:** on the [Releases](https://github.com/Tarik2142/TSMapTool/releases) page
+  (Windows, 64-bit, no Python needed). Put it into a folder of its own, for example `TimeShift\TSMapTool`:
+  `config.json` and the map library (`library\`) are kept next to it. Every push to `main` that changes code
+  builds a new release `build-N` (`.github\workflows\release.yml`, PyInstaller); it has the GUI only.
 - **GUI:** `TSMapTool.bat`, or double-click `maptool_gui.pyw`.
 - **Command line:** `python maptool.py <command>`.
 

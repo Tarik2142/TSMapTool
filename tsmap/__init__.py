@@ -1,11 +1,17 @@
 """TimeShift map manager: import / export / remove multiplayer maps of the PC version."""
 import json
 import os
+import sys
 
 from .core import Game, MapToolError  # noqa: F401
 from .i18n import _, detect_language, get_language, set_language, LANGUAGES  # noqa: F401
 
-TOOL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# the folder of config.json and library\: the tool's folder; for the one-file TSMapTool.exe (PyInstaller) the
+# folder of the exe, the code itself runs from a temporary folder that is removed on exit
+if getattr(sys, 'frozen', False):
+    TOOL_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    TOOL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG = os.path.join(TOOL_DIR, 'config.json')
 
 

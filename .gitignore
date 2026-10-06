@@ -8,3 +8,8 @@ config.json
 # python
 __pycache__/
 *.pyc
+
+# PyInstaller (TSMapTool.exe, see .github/workflows/release.yml)
+build/
+dist/
+*.spec

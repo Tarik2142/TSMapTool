@@ -1,0 +1,81 @@
+# Every push to main: build the portable TSMapTool.exe (one file, Python and tkinter inside) and publish it as a
+# new GitHub release build-<run number>, with the commits since the previous build as the notes.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:                    # documentation only: no new build
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+  workflow_dispatch:
+
+permissions:
+  contents: write                    # create the tag and the release
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0             # tags and history for the release notes
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Build raster.dll
+        shell: cmd
+        run: call tsmap\native\build.bat
+
+      - name: Check the sources
+        shell: bash
+        run: |
+          python -m compileall -q maptool.py maptool_gui.pyw maptool_mapview.py maptool_scripts.py maptool_spawn.py tsmap
+          python -c "from tsmap import native; assert native.lib is not None, 'raster.dll does not load'"
+
+      - name: Build TSMapTool.exe
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyinstaller>=6.16"
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name TSMapTool \
+            --add-binary "tsmap/native/raster.dll;tsmap/native" \
+            maptool_gui.pyw
+
+      - name: Release notes
+        shell: bash
+        run: |
+          prev=$(git describe --tags --abbrev=0 --match 'build-*' 2>/dev/null || true)
+          {
+            echo "Portable build of \`$(git rev-parse --short HEAD)\`: download **TSMapTool.exe** and put it into a"
+            echo "folder of its own (for example \`TimeShift\\TSMapTool\`); \`config.json\` and the map library are"
+            echo "kept next to it. Windows, 64-bit; nothing else to install."
+            echo
+            if [ -n "$prev" ]; then
+              echo "Changes since $prev:"
+              git log --pretty='- %s (%h)' "$prev..HEAD"
+            else
+              echo "Changes:"
+              git log --pretty='- %s (%h)' -n 20
+            fi
+          } > notes.md
+          cat notes.md
+
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="build-${{ github.run_number }}"
+          gh release create "$tag" dist/TSMapTool.exe \
+            --target "${{ github.sha }}" \
+            --title "TSMapTool $tag" \
+            --notes-file notes.md \
+            --latest
