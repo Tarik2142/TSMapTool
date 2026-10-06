@@ -5,8 +5,8 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from tsmap import MapToolError, _
-from tsmap.lg import LevelFile, check_script
-from tsmap.mapview import apply_moves
+from tsmap.lg import TEXT, LevelFile, check_script
+from tsmap.mapview import apply_moves, instance_records
 from maptool_mapview import MapWindow
 
 KEYWORDS = r'\b(override|func|if|else|end|return|var|not|and|or|true|false|while|for)\b'
@@ -21,6 +21,8 @@ class ScriptsTab(ttk.Frame):
         self.cls = None            # its level name
         self.edits = {}            # object index -> edited text (not saved yet)
         self.current = None        # object index shown in the editor
+        self.bare = []             # instances without a property text: (matrix offset, name, template, pos)
+        self.current_bare = None   # matrix offset of the one shown (read-only)
         self.functions = []
         self.map_rows = []
         self.saved_edited = False
@@ -74,6 +76,7 @@ class ScriptsTab(ttk.Frame):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor=a, stretch=c == 'name')
         self.tree.tag_configure('changed', foreground='#d08000')
+        self.tree.tag_configure('bare', foreground='#808080')
         sb = ttk.Scrollbar(left, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side='left', fill='both', expand=True)
@@ -206,6 +209,10 @@ class ScriptsTab(ttk.Frame):
 
     def _loaded(self, cls, level, edited):
         self.cls, self.level, self.edits, self.current = cls, level, {}, None
+        # instances without a property text (most pickups, start points ...): listed read-only, for the map
+        self.bare = [(mpos, name, tpl or kls, m[12:15]) for c, name, tpl, kls, m, mpos in instance_records(level)
+                     if not any(k.tag == TEXT for k in c.children or ())]
+        self.current_bare = None
         n = sum(o.has_script for o in level.objects)
         self.saved_edited = edited
         self._fill_objects()
@@ -247,24 +254,61 @@ class ScriptsTab(ttk.Frame):
             self.tree.insert('', 'end', iid=str(o.index), tags=('changed',) if changed else (),
                              values=(o.name, o.template, _(SECTION_NAMES.get(o.section, o.section)),
                                      '✓' if re.search(r'(?m)^#ssl\s*$', text) else '', '●' if changed else ''))
-        if self.current is not None and self.tree.exists(str(self.current)):
-            self.tree.selection_set(str(self.current))
-            self.tree.see(str(self.current))
+        if not self.only_scripts.get():
+            q = self.search_var.get().lower()
+            for mpos, name, ref, _pos in self.bare:
+                if not q or q in name.lower() or q in ref.lower():
+                    self.tree.insert('', 'end', iid='x%d' % mpos, tags=('bare',),
+                                     values=(name, ref, _(SECTION_NAMES['effects']), '', ''))
+        iid = 'x%d' % self.current_bare if self.current_bare is not None else str(self.current)
+        if self.tree.exists(iid):
+            self.tree.selection_set(iid)
+            self.tree.see(iid)
 
     def _on_object(self, event=None):
         sel = self.tree.selection()
         if not sel:
             return
+        if sel[0].startswith('x'):
+            self._on_bare(int(sel[0][1:]))
+            return
         idx = int(sel[0])
         if idx == self.current:
             return
         self._store_current()
-        self.current = idx
+        self.current, self.current_bare = idx, None
         o = self.level.objects[idx]
         self.obj_var.set('%s   (%s, %s)' % (o.name, o.template or '—', _(SECTION_NAMES.get(o.section, o.section))))
         self._set_text(self.edits.get(idx, o.text).replace('\r\n', '\n'), editable=True)
         if self._map_open():
             self.map_win.highlight_text(idx)
+
+    def _on_bare(self, mpos):
+        """An instance without a property text: nothing to edit here, show what it is and where."""
+        if mpos == self.current_bare and self.current is None:
+            return
+        self._store_current()
+        self.current, self.current_bare = None, mpos
+        name, ref, pos = next((n, r, p) for m, n, r, p in self.bare if m == mpos)
+        if self._map_open() and mpos in self.map_win.moves:
+            pos = self.map_win.moves[mpos][12:15]
+        self.obj_var.set('%s   (%s, %s)' % (name, ref or '—', _(SECTION_NAMES['effects'])))
+        self._set_text(_('%s has no property text and no script, there is nothing to edit here.\n'
+                         'It can be moved on the map (Map, Move objects).', name)
+                       + '\n\n' + _('Position: %.2f, %.2f, %.2f', *pos), editable=False)
+        if self._map_open():
+            self.map_win.highlight_instance(mpos)
+
+    def show_instance(self, mpos):
+        """An instance without a text was clicked on the map: select its read-only row."""
+        iid = 'x%d' % mpos
+        if not self.tree.exists(iid):
+            self.only_scripts.set(False)
+            self.search_var.set('')
+            self._fill_objects()
+        if self.tree.exists(iid):
+            self.tree.selection_set(iid)
+            self.tree.see(iid)
 
     # ------------------------------------------------------------------ map window
     def _map_open(self):
@@ -281,6 +325,8 @@ class ScriptsTab(ttk.Frame):
         self.map_win.set_level(self.cls, self.level)
         if self.current is not None:
             self.map_win.highlight_text(self.current)
+        elif self.current_bare is not None:
+            self.map_win.highlight_instance(self.current_bare)
 
     def moves_changed(self):
         """The map window moved an object or dropped a move."""

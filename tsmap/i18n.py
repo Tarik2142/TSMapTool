@@ -258,6 +258,11 @@ UK = {
     '%s: %d triangles, %d objects': '%s: трикутників %d, об\'єктів %d',
     'click: show in the list': 'клік: показати в списку',
     'Move objects': 'Переміщення',
+    '%s has no property text and no script, there is nothing to edit here.\n'
+    'It can be moved on the map (Map, Move objects).':
+        '%s не має тексту властивостей і скрипту, тут нічого редагувати.\n'
+        'Його можна перемістити на карті («Карта», «Переміщення»).',
+    'Position: %.2f, %.2f, %.2f': 'Позиція: %.2f, %.2f, %.2f',
     'Angle': 'Кут',
     'Set': 'Задати',
     'On the floor': 'На підлогу',

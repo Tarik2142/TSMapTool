@@ -197,8 +197,11 @@ class MapWindow(tk.Toplevel):
         self._fill_edit()
         self._changed(fit=not keep)
         if self._pending is not None:
-            index, self._pending = self._pending, None
-            self.highlight_text(index)
+            pending, self._pending = self._pending, None
+            if isinstance(pending, tuple):
+                self.highlight_instance(pending[1])
+            else:
+                self.highlight_text(pending)
 
     # ------------------------------------------------------------------ transform
     def _size(self):
@@ -532,17 +535,33 @@ class MapWindow(tk.Toplevel):
         text = '%s  [%s%s]  (%.1f, %.1f, %.1f)' % (o.name, kind, ', ' + o.template if o.template else '', *o.pos)
         if o.kind == 'zone':
             text += '  ' + (_('height %g m', o.height) if o.height is not None else _('height not set'))
-        if o.texts:
+        if o.texts or o.movable:
             text += '  ' + _('click: show in the list')
         return text
 
     # ------------------------------------------------------------------ selection
+    def _show_in_list(self, o):
+        """Select the object in the Scripts list: its property text, or its read-only row when it has none."""
+        if o.texts:
+            self.tab.show_object(o.texts[0])
+        elif o.movable:
+            self.tab.show_instance(o.mpos)
+
+    def highlight_instance(self, mpos):
+        """An instance without a property text was selected in the Scripts list: mark it on the map."""
+        if not self.view:
+            self._pending = ('instance', mpos)
+            return
+        self._highlight(next((o for o in self.view.objects if o.mpos == mpos), None))
+
     def highlight_text(self, index):
         """An object was selected in the Scripts list: mark it on the map."""
         if not self.view:
             self._pending = index                 # shown when the view is ready
             return
-        o = self.view.by_text.get(index)
+        self._highlight(self.view.by_text.get(index))
+
+    def _highlight(self, o):
         self.selected = o
         self._fill_edit()
         if o is None:
@@ -714,8 +733,7 @@ class MapWindow(tk.Toplevel):
         self._moving = (o, o.pos[0] - p[0], o.pos[2] - p[1], o.pos[1], self._floor_offset(o))
         self._fill_edit()
         self.status.set(self._describe(o))
-        if o.texts:
-            self.tab.show_object(o.texts[0])
+        self._show_in_list(o)
         return True
 
     def _move_to(self, e):
@@ -850,8 +868,7 @@ class MapWindow(tk.Toplevel):
         if o is None:
             return
         self.status.set(self._describe(o))
-        if o.texts:
-            self.tab.show_object(o.texts[0])
+        self._show_in_list(o)
 
     def _on_double(self, e):
         """3D: rotate around the point under the cursor."""
