@@ -170,6 +170,18 @@ The **Map** button shows the map selected on the **Scripts** tab from above.
     needs are added to the map's preload list when the level is saved; every map already loads all player
     weapons, a weapon pickup only adds its own template (`item_mp_sniper`). The model of the chosen object is
     shown on the right; items such as armour have none (in game they are only an effect).
+  - **Templates of the game.** After the objects of the multiplayer maps the catalog lists the other
+    templates of the game (about 220: metal containers, wagons, turrets, vehicles, oaks, boxes, and in a
+    category of their own, **Debris**, stones, planks, vehicle parts). They are marked "not tested": no
+    multiplayer map places them, so whether such an object works in multiplayer is seen only in game. Their
+    record gets the template's name and class (the class is written in the template's head). Templates without
+    a class (bodies and their parts, weapons in hand, crosshairs), characters, effects and projectiles are
+    left out.
+  - **Resources of new objects.** Not only the template goes to the preload list but everything the object's
+    class names: its crosshair, shot dispatchers and projectiles, effects, lights (`tur_charging` without
+    `crs_tur_charging` and `sfx_tur_alt_expl` crashes the game while the map loads). Every save checks again all
+    objects that the original level does not have, so a list an older version saved incomplete is completed
+    even by **Save and apply** without other changes.
 
   The changes are saved together with the script edits (**Save** in the map window or on the **Scripts**
   tab). A move changes only the matrix of the record. Copy and delete add or remove a record in the object
@@ -249,7 +261,7 @@ TSMapTool\
   tsmap\spawn.py       bots and vehicles: object conversion, resources for the preload list
   tsmap\mapview.py     top and 3D view of a level: geometry, object positions
   tsmap\native\        map renderer in C (raster.c, raster.dll, build.bat) and its ctypes binding
-  tsmap\catalog.py     catalog of objects from all multiplayer maps
+  tsmap\catalog.py     catalog of objects from all multiplayer maps and the other game templates
   tsmap\i18n.py        interface localization (English strings + Ukrainian table)
   docs\scripts.md      level scripting reference (Ukrainian)
   library\             added maps (*.tsmap, library.json, overrides\) — not in the repository

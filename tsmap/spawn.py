@@ -350,10 +350,14 @@ class ResourceIndex:
     def resources(self, tpl, cls=''):
         """{preload section: [names]} for a template (and its class)."""
         out = collections.defaultdict(set)
-        sounds, seen_t, seen_c = set(), set(), set()
-        # classes: (name, direct) - templates are taken only from classes tied to a template directly,
-        # base classes (parentDesc) give their sounds only, otherwise half of the game is pulled in
-        todo_t, todo_c = [tpl.lower()], [(c.lower(), True) for c in (cls, tpl) if c]
+        sounds, seen_t, seen_c = set(), set(), {}
+        # classes: (name, mode). DEEP: the object's own class and every class it names (dispatchers, projectiles,
+        # effects, its crosshair - tur_charging crashes the game without crs_tur_charging and sfx_tur_alt_expl):
+        # all templates and textures they name. TIED: a class tied to a template found on the way (nameTpl): its
+        # templates only. BASE: base classes (parentDesc): their sounds only. Following more than that pulls in
+        # half of the game (the tank: soldiers and police through the classes that use its rockets)
+        DEEP, TIED, BASE = 2, 1, 0
+        todo_t, todo_c = [tpl.lower()], [(c.lower(), DEEP) for c in (cls, tpl) if c]
         if cls and cls.lower() not in self.blocks and 12 in self.names.get(cls.lower(), ()):
             todo_t.append(cls.lower())         # item_mp_sniper: no ps block, a template of the same name
         sections = {12: 'Templates', 6: 'Textures', 7: 'Cubemaps', 15: 'Ragdolls'}
@@ -364,7 +368,7 @@ class ResourceIndex:
                     continue
                 seen_t.add(t)
                 out['Templates'].add(t)
-                todo_c += [(c, True) for c in self.uses_tpl.get(t, ())]
+                todo_c += [(c, TIED) for c in self.uses_tpl.get(t, ())]
                 data = self.game.read_orig('main', self.arc.get(t, 12))
                 for s in set(re.findall(rb'[A-Za-z_][A-Za-z0-9_]{2,}', data)):
                     w = s.decode('latin1').lower()
@@ -374,14 +378,25 @@ class ResourceIndex:
                         elif ty in sections:
                             out[sections[ty]].add(w)
             else:
-                c, direct = todo_c.pop()
-                if c in seen_c:
+                c, mode = todo_c.pop()
+                if seen_c.get(c, -1) >= mode:
                     continue
-                seen_c.add(c)
+                seen_c[c] = mode
                 for b in self.blocks.get(c, []):
-                    todo_c += [(p.lower(), False) for p in re.findall(r'\bparentDesc\s*=\s*"?(\w+)', b)]
-                    if direct:
+                    todo_c += [(p.lower(), BASE) for p in re.findall(r'\bparentDesc\s*=\s*"?(\w+)', b)]
+                    if mode >= TIED:
                         todo_t += [t.lower() for t in re.findall(r'\b(?:nameTpl|tpl|nameClass)\s*=\s*"?(\w+)', b)]
+                    if mode == DEEP:
+                        body = re.sub(r'\bparentDesc\s*=\s*"?\w+', '', b)
+                        for w in re.findall(r'=\s*"?([A-Za-z_]\w*)', body):
+                            w = w.lower()
+                            if w in self.blocks and w != c:
+                                todo_c.append((w, DEEP))
+                            for ty in self.names.get(w, ()):
+                                if ty == 12:
+                                    todo_t.append(w)
+                                elif ty in sections:
+                                    out[sections[ty]].add(w)
                     for sl in re.findall(r'sounds_list\s*\{(.*?)\}', b, re.S):
                         sounds.update(v for v in re.findall(r'=\s*"?([A-Za-z_]\w+)', sl) if v not in ('Yes', 'No'))
         out['Sounds'] = sounds
@@ -436,19 +451,43 @@ def add_resources(game, cls, templates, log=lambda m: None):
 
 
 def needed_resources(game, cls, templates):
-    """{section: [names]} for [(template, class)], skipping what the map's main list already has."""
-    data = game.map_list_data(cls, 'main')
-    have = set()
-    if data is not None:
-        n = struct.unpack_from('<I', data)[0]
-        have = {(s, i.lower()) for s, items in xbox.parse_list_text(data[4:4 + n].decode('latin1')) for i in items}
-    todo = [(tpl, tcls) for tpl, tcls in templates                 # already loaded by the map (soldiers are
-            if ('Templates', (tpl or tcls).lower()) not in have]   # player models, every map has all weapons)
+    """{section: [names]} for [(template, class)], skipping what the map's main list already has. A template of
+    the map's own list (as shipped) is skipped as a whole: the map loads everything it needs. One added by an
+    earlier save is walked again, so a list saved incomplete gets the rest."""
+    have = _list_names(game.map_list_data(cls, 'main'))
+    shipped = _list_names(game.map_list_data(cls, 'main', original=True))
+    todo = [(tpl, tcls) for tpl, tcls in templates                    # already loaded by the map (soldiers are
+            if ('Templates', (tpl or tcls).lower()) not in shipped]   # player models, every map has all weapons)
     if not todo:
         return {}
     idx = resource_index(game)
     out = collections.defaultdict(set)
     for tpl, tcls in todo:
-        for s, names in idx.resources(tpl, tcls).items():
-            out[s].update(n for n in names if (s, n) not in have)
+        for s, items in idx.resources(tpl, tcls).items():
+            out[s].update(n for n in items if (s, n) not in have)
     return {k: sorted(v) for k, v in out.items() if v}
+
+
+def _list_names(data):
+    """{(section, lower-case name)} of a preload list (empty for None)."""
+    if data is None:
+        return set()
+    n = struct.unpack_from('<I', data)[0]
+    return {(s, i.lower()) for s, items in xbox.parse_list_text(data[4:4 + n].decode('latin1')) for i in items}
+
+
+def placed_templates(game, cls, data):
+    """[(template, class)] of the instances of level data whose template is not in the map's own preload list
+    (as shipped): objects added by this tool, now or by an earlier save, which may have missed some of what they
+    need (tur_charging before its crosshair and projectiles were followed). A save walks them again."""
+    from .mapview import instance_records
+    shipped = _list_names(game.map_list_data(cls, 'main', original=True))
+    own = {r.name for r in instance_records(LevelFile(game.level_data(cls, original=True)))}   # as the map has them
+    arc = game.orig['main']
+    out = []
+    for r in instance_records(LevelFile(data)):
+        key = (r.tpl, r.cls)
+        if (r.tpl and r.name not in own and ('Templates', r.tpl.lower()) not in shipped and key not in out
+                and arc.get(r.tpl.lower(), 12) is not None):
+            out.append(key)
+    return out

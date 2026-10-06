@@ -841,17 +841,25 @@ def node_chain(d, node, stop):
 
 
 def node_mesh(d, k):
-    """(vertices, triangles) of a scene node (its children by tag), None without a valid mesh."""
+    """(vertices, triangles) of a scene node (its children by tag), None without a valid mesh. The triangles are
+    0xf2 (u32 n + n x 3 u16) or, in some templates (metal containers, carts, the monitor), 0x106 with one 0xff
+    chunk of 3 u16 per triangle."""
     vc, tc = k.get(0xf1), k.get(0xf2)
-    if vc is None or tc is None:
+    if vc is None or (tc is None and 0x106 not in k):
         return None
     nv = struct.unpack_from('<I', d, vc.start)[0]
-    nt = struct.unpack_from('<I', d, tc.start)[0]
-    if 4 + 12 * nv != vc.end - vc.start or 4 + 6 * nt != tc.end - tc.start:
+    if 4 + 12 * nv != vc.end - vc.start:
         return None
+    if tc is not None:
+        nt = struct.unpack_from('<I', d, tc.start)[0]
+        if 4 + 6 * nt != tc.end - tc.start:
+            return None
+        tris = struct.iter_unpack('<3H', d[tc.start + 4:tc.end])
+    else:
+        tris = (struct.unpack_from('<3H', d, t.start) for t in k[0x106].children or ()
+                if t.tag == 0xff and t.end - t.start == 6)
     verts = list(struct.iter_unpack('<3f', d[vc.start + 4:vc.end]))
-    tris = [t for t in struct.iter_unpack('<3H', d[tc.start + 4:tc.end]) if max(t) < nv]
-    return verts, tris
+    return verts, [t for t in tris if max(t) < nv]
 
 
 class TemplateMeshes:

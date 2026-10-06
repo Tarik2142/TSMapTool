@@ -265,6 +265,9 @@ UK = {
     'Angle': 'Кут',
     'Edit objects': 'Редагування',
     'Catalog...': 'Каталог...',
+    'Debris': 'Уламки',
+    'a template of the game, check in game whether it works in multiplayer':
+        'шаблон гри, чи працює він у мультиплеєрі, видно лише в грі',
     'Loading ...': 'Завантаження ...',
     'No model: the object is only an effect or a marker in game.':
         'Моделі немає: у грі це лише ефект або позначка.',

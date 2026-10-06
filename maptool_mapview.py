@@ -1176,8 +1176,9 @@ class MapWindow(tk.Toplevel):
 
 
 class CatalogDialog(tk.Toplevel):
-    """Objects found on the multiplayer maps (and the vehicles of the Bots and vehicles tab) to add to this map."""
-    CATEGORIES = ('pickup', 'vehicle', 'object', 'plant')
+    """Objects found on the multiplayer maps (and the vehicles of the Bots and vehicles tab), then the other
+    templates of the game, to add to this map."""
+    CATEGORIES = ('pickup', 'vehicle', 'object', 'plant', 'debris')
 
     def __init__(self, win):
         super().__init__(win)
@@ -1189,7 +1190,7 @@ class CatalogDialog(tk.Toplevel):
         self.photo = None
         self._shown = None
         names = {'pickup': _('Weapons and items'), 'vehicle': _('Vehicles'), 'object': _('Objects'),
-                 'plant': _('Plants')}
+                 'plant': _('Plants'), 'debris': _('Debris')}
         self.cat_names = [('', _('All'))] + [(c, names[c]) for c in self.CATEGORIES]
         bar = ttk.Frame(self, padding=6)
         bar.pack(fill='x')
@@ -1272,7 +1273,9 @@ class CatalogDialog(tk.Toplevel):
             self._draw_preview(e)
             self.info.set('%s  (%s)  %s' % (e.label, e.cls or '—', _('maps: %s', ', '.join(e.maps[:8])
                                                                        + (' ...' if len(e.maps) > 8 else ''))
-                                             if e.maps else _('not on any multiplayer map')))
+                                             if e.maps else _('not on any multiplayer map')
+                                             + ('; ' + _('a template of the game, check in game whether it works in '
+                                                         'multiplayer') if e.extra else '')))
 
     def _draw_preview(self, e):
         """The template of the entry, drawn in the background (a big vehicle takes a fraction of a second)."""

@@ -514,9 +514,10 @@ class Game:
                 except FileNotFoundError:
                     pass
 
-    def map_list_data(self, cls, arc='main'):
-        """Current preload list of a map in one archive: edited, from the library or from the game."""
-        data = self.override_data(cls, 0, arc)
+    def map_list_data(self, cls, arc='main', original=False):
+        """Current preload list of a map in one archive: edited, from the library or from the game (`original`:
+        not the edited one)."""
+        data = None if original else self.override_data(cls, 0, arc)
         if data is not None:
             return data
         for m in self.library()['maps']:

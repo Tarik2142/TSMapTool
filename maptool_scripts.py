@@ -7,7 +7,7 @@ from tkinter import messagebox, ttk
 from tsmap import MapToolError, _
 from tsmap.lg import TEXT, LevelFile, check_script
 from tsmap.mapview import apply_moves, edit_instances, instance_records
-from tsmap.spawn import add_resources
+from tsmap.spawn import add_resources, placed_templates
 from maptool_mapview import MapWindow
 
 KEYWORDS = r'\b(override|func|if|else|end|return|var|not|and|or|true|false|while|for)\b'
@@ -480,8 +480,11 @@ class ScriptsTab(ttk.Frame):
                 if adds or deletes or flags:
                     self.app._say(_('%s: %d objects added, %d deleted, flags of %d changed', cls, len(adds),
                                     len(deletes), len(flags)))
-                if resources:                        # objects from the catalog: templates, textures, sounds
-                    add_resources(game, cls, resources, self.app._say)
+            # objects from the catalog: templates, textures, sounds; with them every object added by an earlier
+            # save (its list may lack what a newer version of the tool finds; "Save and apply" alone fixes it)
+            extra = [t for t in placed_templates(game, cls, data or level.data) if t not in resources]
+            if resources or extra:
+                add_resources(game, cls, list(resources) + extra, self.app._say)
             if apply:
                 game.apply(self.app._say)
         def done(err):
