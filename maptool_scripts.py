@@ -6,7 +6,8 @@ from tkinter import messagebox, ttk
 
 from tsmap import MapToolError, _
 from tsmap.lg import TEXT, LevelFile, check_script
-from tsmap.mapview import apply_moves, instance_records
+from tsmap.mapview import apply_moves, edit_instances, instance_records
+from tsmap.spawn import add_resources
 from maptool_mapview import MapWindow
 
 KEYWORDS = r'\b(override|func|if|else|end|return|var|not|and|or|true|false|while|for)\b'
@@ -172,11 +173,11 @@ class ScriptsTab(ttk.Frame):
 
     def unsaved(self):
         self._store_current()
-        return bool(self.edits or self._moves())
+        return bool(self.edits or self._map_pending())
 
-    def _moves(self):
-        """Objects moved on the map and not saved yet: {matrix offset: matrix}."""
-        return self.map_win.moves if self._map_open() else {}
+    def _map_pending(self):
+        """Number of changes in the map window (moved / added / deleted objects, flags) not saved yet."""
+        return self.map_win.pending() if self._map_open() else 0
 
     def _on_map(self, event=None):
         i = self.map_box.current()
@@ -210,8 +211,8 @@ class ScriptsTab(ttk.Frame):
     def _loaded(self, cls, level, edited):
         self.cls, self.level, self.edits, self.current = cls, level, {}, None
         # instances without a property text (most pickups, start points ...): listed read-only, for the map
-        self.bare = [(mpos, name, tpl or kls, m[12:15]) for c, name, tpl, kls, m, mpos in instance_records(level)
-                     if not any(k.tag == TEXT for k in c.children or ())]
+        self.bare = [(r.mpos, r.name, r.tpl or r.cls, r.matrix[12:15]) for r in instance_records(level)
+                     if not any(tag == TEXT for tag, payload in r.children)]
         self.current_bare = None
         n = sum(o.has_script for o in level.objects)
         self.saved_edited = edited
@@ -294,7 +295,7 @@ class ScriptsTab(ttk.Frame):
             pos = self.map_win.moves[mpos][12:15]
         self.obj_var.set('%s   (%s, %s)' % (name, ref or '—', _(SECTION_NAMES['effects'])))
         self._set_text(_('%s has no property text and no script, there is nothing to edit here.\n'
-                         'It can be moved on the map (Map, Move objects).', name)
+                         'It can be moved, copied or deleted on the map (Map, Edit objects).', name)
                        + '\n\n' + _('Position: %.2f, %.2f, %.2f', *pos), editable=False)
         if self._map_open():
             self.map_win.highlight_instance(mpos)
@@ -362,13 +363,13 @@ class ScriptsTab(ttk.Frame):
             self.tree.item(str(idx), values=vals, tags=('changed',) if changed else ())
 
     def _update_state(self):
-        moves = len(self._moves()) if self.level else 0
+        on_map = self._map_pending() if self.level else 0
         if not self.level:
             self.state_var.set('')
-        elif self.edits or moves:
+        elif self.edits or on_map:
             self.state_var.set(', '.join(
                 ([_('Changed objects: %d (not saved)', len(self.edits))] if self.edits else [])
-                + ([_('Moved objects: %d (not saved)', moves)] if moves else [])))
+                + ([_('Map changes: %d (not saved)', on_map)] if on_map else [])))
         elif self.saved_edited:
             self.state_var.set(_('This level has saved edits'))
         else:
@@ -439,8 +440,9 @@ class ScriptsTab(ttk.Frame):
         if not self.level:
             return
         self._store_current()
-        moves = dict(self._moves())
-        if not self.edits and not moves and not apply:
+        moves, adds, deletes, flags, resources = (self.map_win.changes() if self._map_open()
+                                                  else ({}, [], set(), {}, []))
+        if not self.edits and not (moves or adds or deletes or flags) and not apply:
             return
         problems = []
         for idx, text in self.edits.items():
@@ -466,6 +468,8 @@ class ScriptsTab(ttk.Frame):
                 data = apply_moves(level.data, moves)
             if edits:                                # the object indices do not change with the moves
                 data = (LevelFile(data) if data else level).replace_texts(edits)
+            if adds or deletes or flags:             # by instance name: last, it changes the structure
+                data = edit_instances(LevelFile(data) if data else level, adds, deletes, flags)
             if data is not None:
                 LevelFile(data)                      # the result must parse again before it is stored
                 game.save_level_override(cls, data, self.app._say)
@@ -473,13 +477,18 @@ class ScriptsTab(ttk.Frame):
                     self.app._say(_('%s: %d objects changed', cls, len(edits)))
                 if moves:
                     self.app._say(_('%s: %d objects moved', cls, len(moves)))
+                if adds or deletes or flags:
+                    self.app._say(_('%s: %d objects added, %d deleted, flags of %d changed', cls, len(adds),
+                                    len(deletes), len(flags)))
+                if resources:                        # objects from the catalog: templates, textures, sounds
+                    add_resources(game, cls, resources, self.app._say)
             if apply:
                 game.apply(self.app._say)
         def done(err):
             if not err:                              # reload the saved level; keep the edits on failure
                 self.edits = {}
                 if self._map_open():
-                    self.map_win.moves.clear()
+                    self.map_win.forget_changes()
                 self.cls = None
                 self.load_map(cls)
         self.app._run(_('Saving scripts'), fn, done=done)
@@ -498,7 +507,7 @@ class ScriptsTab(ttk.Frame):
             if not err:
                 self.edits = {}
                 if self._map_open():
-                    self.map_win.moves.clear()
+                    self.map_win.forget_changes()
                 self.cls = None
                 self.load_map(cls)
         self.app._run(_('Restoring the level'), fn, done=done)

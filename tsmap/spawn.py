@@ -354,6 +354,8 @@ class ResourceIndex:
         # classes: (name, direct) - templates are taken only from classes tied to a template directly,
         # base classes (parentDesc) give their sounds only, otherwise half of the game is pulled in
         todo_t, todo_c = [tpl.lower()], [(c.lower(), True) for c in (cls, tpl) if c]
+        if cls and cls.lower() not in self.blocks and 12 in self.names.get(cls.lower(), ()):
+            todo_t.append(cls.lower())         # item_mp_sniper: no ps block, a template of the same name
         sections = {12: 'Templates', 6: 'Textures', 7: 'Cubemaps', 15: 'Ragdolls'}
         while todo_t or todo_c:
             if todo_t:
@@ -414,6 +416,12 @@ def save_edit(game, cls, data, templates=(), log=lambda m: None):
     from .i18n import _
     LevelFile(data)                       # must parse again before it is stored
     game.save_level_override(cls, data, log)
+    add_resources(game, cls, templates, log)
+
+
+def add_resources(game, cls, templates, log=lambda m: None):
+    """Add what [(template, class)] need to the map's preload lists (all archives)."""
+    from .i18n import _
     res = needed_resources(game, cls, templates) if templates else {}
     if not res:
         return
@@ -434,11 +442,13 @@ def needed_resources(game, cls, templates):
     if data is not None:
         n = struct.unpack_from('<I', data)[0]
         have = {(s, i.lower()) for s, items in xbox.parse_list_text(data[4:4 + n].decode('latin1')) for i in items}
+    todo = [(tpl, tcls) for tpl, tcls in templates                 # already loaded by the map (soldiers are
+            if ('Templates', (tpl or tcls).lower()) not in have]   # player models, every map has all weapons)
+    if not todo:
+        return {}
     idx = resource_index(game)
     out = collections.defaultdict(set)
-    for tpl, tcls in templates:
-        if ('Templates', tpl.lower()) in have:
-            continue                     # already loaded by the map (soldiers are player models)
+    for tpl, tcls in todo:
         for s, names in idx.resources(tpl, tcls).items():
             out[s].update(n for n in names if (s, n) not in have)
     return {k: sorted(v) for k, v in out.items() if v}

@@ -194,6 +194,56 @@ class LevelFile:
             struct.pack_into('<I', out, moved(c.header) + 2, moved(c.end))
         return bytes(out)
 
+    def rebuild(self, payloads=None, prefixes=None, insert_after=None, delete=()):
+        """New file bytes written from the chunk tree, for changes of the structure:
+            payloads      {leaf chunk: new payload}
+            prefixes      {chunk with children: new raw prefix} (e.g. a record count)
+            insert_after  {chunk: [new chunk, ...]} siblings written right after it; a new chunk is
+                          (tag, payload bytes) or (tag, prefix bytes, [new chunk, ...])
+            delete        chunks left out (with everything inside)
+        Every end offset is computed again, so unchanged input gives the same bytes."""
+        d = self.data
+        payloads, prefixes, insert_after = payloads or {}, prefixes or {}, insert_after or {}
+        delete = set(delete)
+        out = bytearray()
+
+        def open_chunk(tag):
+            out.extend(struct.pack('<HI', tag, 0))
+            return len(out) - 4
+
+        def close_chunk(pos):
+            struct.pack_into('<I', out, pos, len(out))
+
+        def write_new(spec):
+            pos = open_chunk(spec[0])
+            if len(spec) == 2:
+                out.extend(spec[1])
+            else:
+                out.extend(spec[1])
+                for k in spec[2]:
+                    write_new(k)
+            close_chunk(pos)
+
+        def write(c):
+            if c in delete:
+                return
+            pos = open_chunk(c.tag)
+            if c.children is None or c in payloads:
+                if c.children and c in payloads:
+                    raise ValueError('only leaf chunks can be replaced')
+                out.extend(payloads.get(c, d[c.start:c.end]))
+            else:
+                out.extend(prefixes.get(c, d[c.start:c.start + c.pre]))
+                for k in c.children:
+                    write(k)
+            close_chunk(pos)
+            for spec in insert_after.get(c, ()):
+                write_new(spec)
+
+        for c in self.top:
+            write(c)
+        return bytes(out)
+
 
 # ------------------------------------------------------------------ helpers for the editor ---
 

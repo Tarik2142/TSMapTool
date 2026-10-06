@@ -39,7 +39,7 @@ Close the game before making changes.
 | Check the game archives | — | `maptool.py verify` |
 | Edit object scripts and properties | **Scripts** tab | — |
 | Add bots and vehicles | **Bots and vehicles** tab | — |
-| Top view of a level with all its objects | **Scripts** tab, **Map** button | — |
+| Level map (2D / 3D), move, copy and delete objects | **Scripts** tab, **Map** button | — |
 
 `<level>` is the internal map name, e.g. `dlc1_multiplayer13` or `multiplayer2` (the **Level** column).
 Import, remove and unhide are applied to the game right away (use `--no-apply` on the command line to batch them).
@@ -110,6 +110,10 @@ end
 
 The **Map** button shows the map selected on the **Scripts** tab from above.
 
+- **Objects with models.** Boxes, barrels, vehicles, plants, turrets and so on are drawn with their models
+  from the game's templates (archive entries of type 12, the same format as the prototypes of a level; the
+  parts of a model are placed relative to their nodes, collision hulls and transparent effects are left out).
+  A moved or added object shows the outline of its model until it is saved.
 - **Geometry.** The level's triangles are coloured by height, from blue (low) to light (high). The sky,
   player clip walls, AI helper meshes and transparent surfaces are left out.
 - **Height cut.** Hides everything that lies entirely above the given height, which shows rooms under roofs
@@ -137,18 +141,38 @@ The **Map** button shows the map selected on the **Scripts** tab from above.
   property text: `DOMAIN { height = N }`. In 3D such zones are drawn as prisms N metres high, zones without
   that block (fog, grass, some sound zones) as a dotted outline: the game uses its own default for them.
   The zone height is shown in the hover text.
-- **Moving objects.** The **Move objects** switch lets you move and turn start points, pickups, vehicles
-  and other instance objects: drag a marker (in 2D and 3D), R / Shift+R turns it by 15°, or type X, Y, Z and
-  the angle in the bar. A dragged object lands on the highest floor at the new place that is at most 0.5 m
-  above its old position, and keeps its height above the floor. **On the floor** drops the selected
-  object, **Undo move** puts it back where it was before it was moved, **Original position** where the
-  original game level has it. The arrow shows the object's local Z axis; for start points it is the
-  direction the player faces after spawning (checked in game). Moves are saved together with the script
-  edits (**Save** in the map window or on the **Scripts** tab). Only the matrix of the record changes in the
-  file, the level keeps its size. Zones, walls and other static geometry cannot be moved: they are part of the level's spatial
-  grid and of its collision files. The geometry of doors and gates moves in the picture after saving.
+- **Editing objects.** The **Edit objects** switch opens a bar for start points, pickups, vehicles and other
+  instance objects (in 2D and 3D):
+  - **Move and turn.** Drag a marker, R / Shift+R turns it by 15°, or type X, Y, Z and the angle. A dragged
+    object lands on the highest floor at the new place that is at most 0.5 m above its old position, and
+    keeps its height above the floor. **On the floor** drops the selected object, **Original position** puts
+    it where the original game level has it. The arrow shows the local Z axis; for start points it is the
+    direction the player faces after spawning (checked in game).
+  - **Copy / Delete.** A copy appears next to the object with the same template, flags and property text and
+    a new name (`start_pos17`, `item_armor3_2` ...); drag it into place. When scripts use the object being
+    deleted (`$name`), the tool warns. Until saved, a deleted object is shown as a red cross, an added one
+    with a dashed circle.
+  - **Flags.** Check boxes set for which teams the object is a spawn point (no teams, team 1, team 2) and in
+    which game modes it is left out (`notIN_DM`, `TDM`, `CTF`, `KOT`, `STM`, `1V1`). Other flags are shown in
+    grey and kept. Start points and CTF flag positions are recognised by these flags (`swMP_SP_*`,
+    `swMP_RED/BLUE_FLAG_POS`), so they show up on maps where they are not named `start_pos`.
+  - **Undo changes** returns the selected object to its saved state (removes a new one).
+  - **Catalog.** **Catalog...** lists everything found on the game's multiplayer maps (weapons and items,
+    boxes, barrels, turrets, plants ...) and the vehicles of the **Bots and vehicles** tab. The chosen object
+    appears on the floor in the middle of the view; drag it into place. It is a record of another map
+    without its script part (`#ssl`) and without team / mode flags. The templates, textures and sounds it
+    needs are added to the map's preload list when the level is saved; every map already loads all player
+    weapons, a weapon pickup only adds its own template (`item_mp_sniper`). The model of the chosen object is
+    shown on the right; items such as armour have none (in game they are only an effect).
 
-X points right and Z up. Whether this matches the game or is mirrored has not been checked yet.
+  The changes are saved together with the script edits (**Save** in the map window or on the **Scripts**
+  tab). A move changes only the matrix of the record. Copy and delete add or remove a record in the object
+  section and update the record count at its start; the rest of the file is written again from the chunk
+  tree. Zones, walls and other static geometry cannot be edited: they are part of the level's spatial grid
+  and of its collision files. The geometry of doors and gates is updated in the picture after saving.
+
+X points right and Z up. The orientation matches the game: pickups and start points moved on the map end
+up where they were put.
 
 ## Bots and vehicles
 
@@ -218,6 +242,7 @@ TSMapTool\
   tsmap\lg.py          .lg levels: object property texts and scripts
   tsmap\spawn.py       bots and vehicles: object conversion, resources for the preload list
   tsmap\mapview.py     top and 3D view of a level: geometry, object positions
+  tsmap\catalog.py     catalog of objects from all multiplayer maps
   tsmap\i18n.py        interface localization (English strings + Ukrainian table)
   docs\scripts.md      level scripting reference (Ukrainian)
   library\             added maps (*.tsmap, library.json, overrides\) — not in the repository

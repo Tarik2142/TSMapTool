@@ -11,17 +11,22 @@ X to the right and Z up.
 """
 import array
 import base64
+import collections
 import math
 import re
 import struct
 import zlib
 
-from .lg import TEXT, _cstr
+from .lg import TEXT, Chunk, _cstr, _parse, _seq
 
 IDENT = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
-LIGHT = (-0.45, 0.8, 0.4)
+LIGHT = (-0.45, 0.8, 0.4)          # direction to the light: from the upper left of the view
 PREVIEW_FACES = 12000             # faces drawn while the 3D camera moves
-HIDDEN_FLAGS ={'vis', 'nc', 'plrc', 'aiv', 'aic', 'ainv', 'ainc'}          # direction to the light: from the upper left of the view
+HIDDEN_FLAGS = {'vis', 'nc', 'plrc', 'aiv', 'aic', 'ainv', 'ainc'}
+# instance flags (chunk 0x1bb after the record): spawn points by team, CTF flag positions, game mode filters
+SPAWN_FLAGS = ('swMP_SP_NONTEAM', 'swMP_SP_TEAM1', 'swMP_SP_TEAM2')
+FLAG_POS = ('swMP_RED_FLAG_POS', 'swMP_BLUE_FLAG_POS')
+MODES = ('DM', 'TDM', 'CTF', 'KOT', 'STM', '1V1')           # notIN_<mode>: the object is not there in that mode
 
 
 def _mul(a, b):
@@ -66,8 +71,9 @@ def _hull(points):
 
 
 class MapObject:
-    """kind: zone, node, start, pickup, vehicle, sound, effect, object, light."""
-    __slots__ = ('kind', 'name', 'template', 'pos', 'outline', 'texts', 'height', 'matrix', 'mpos')
+    """kind: zone, node, start, flag, pickup, vehicle, sound, effect, object, light."""
+    __slots__ = ('kind', 'name', 'template', 'pos', 'outline', 'texts', 'height', 'matrix', 'mpos', 'flags',
+                 'record', 'new', 'deleted', 'catalog')
 
     def __init__(self, kind, name, template, pos, outline=None):
         self.kind, self.name, self.template, self.pos, self.outline = kind, name, template, pos, outline
@@ -75,10 +81,15 @@ class MapObject:
         self.height = None         # zones: DOMAIN { height } above the flat outline, None when not set
         self.matrix = None         # instances: the 4x4 matrix of the record (16 floats) ...
         self.mpos = None           # ... and its offset in the level file (it can be changed in place)
+        self.flags = ()            # instances: flag names of chunk 0x1bb
+        self.record = None         # instances: the Instance it was read from (the one copied for a new object)
+        self.new = False           # added on the map, not saved yet
+        self.deleted = False       # deleted on the map, not saved yet
+        self.catalog = False       # new object from the catalog: its resources go to the preload list
 
     @property
     def movable(self):
-        return self.mpos is not None
+        return self.mpos is not None or self.new
 
 
 def _kids(c):
@@ -90,8 +101,11 @@ def _is_node(c):
 
 
 class LevelView:
-    def __init__(self, lf):
+    def __init__(self, lf, templates=None):
+        """`templates` (TemplateMeshes) draws the instances whose template is not a prototype of the level
+        (boxes, barrels, vehicles, plants ...); without it they are markers only."""
         self.lf = lf
+        self.templates = templates
         d = lf.data
         self.objects = []
         self.tris = []             # (y max, y min, x0, z0, x1, z1, x2, z2, light, y mean), view coordinates X/Z
@@ -137,28 +151,30 @@ class LevelView:
                 self.objects.append(o)
 
         # instances
-        for c, name, tpl, cls, m, mpos in instance_records(lf):
-            ref = tpl or cls
-            kind = ('start' if name.startswith('start_pos') else 'vehicle' if name.startswith('veh_')
-                    else 'pickup' if name.startswith('item_') or ref.startswith('item_')     # item_mp_*: weapons
-                    else 'sound' if name.startswith(('sndActor', 'music')) or ref.startswith('snd_')
-                    else 'effect' if (not ref and '|' in name                    # s3d_refLocator12|flareActor
-                                      or ref.startswith('sob_flare') or 'sfx' in ref)
-                    else 'object')
-            o = MapObject(kind, name, ref, m[12:15])
-            o.matrix, o.mpos = m, mpos
+        for rec in instance_records(lf):
+            c, name, tpl, m = rec.chunk, rec.name, rec.tpl, rec.matrix
+            o = MapObject(instance_kind(name, tpl, rec.cls, rec.flags), name, tpl or rec.cls, m[12:15])
+            o.matrix, o.mpos, o.flags, o.record = m, rec.mpos, rec.flags, rec
             o.texts = [text_index[t] for t in c.children or () if t.tag == TEXT and t in text_index]
             proto = protos.get(tpl)
             if proto is not None:
                 pts = []
                 for n in _walk_nodes(proto):
                     k = _kids(n)
-                    verts = [_apply(m, v) for v in self._verts(k)]
+                    chain = _mul(node_chain(d, n, proto), m)
+                    verts = [_apply(chain, v) for v in self._verts(k)]
                     if verts and _solid(_cstr(d[k[0x115].start:k[0x115].end]) if 0x115 in k else ''):
                         self._add_mesh(verts, k)
                         pts += [(v[0], v[2]) for v in verts]
                 o.outline = _hull(pts) if pts else None
                 o.texts += [i for t, i in text_index.items() if _inside(t, proto)]
+            elif templates is not None and instance_kind(name, tpl, rec.cls, rec.flags) not in ('effect', 'sound'):
+                pts = []
+                for verts, tris in templates.get(tpl, rec.cls):
+                    wv = [_apply(m, v) for v in verts]
+                    self._add_faces(wv, tris)
+                    pts += [(v[0], v[2]) for v in wv]
+                o.outline = _hull(pts) if pts else None
             self.objects.append(o)
 
         # lights
@@ -199,6 +215,17 @@ class LevelView:
         n = struct.unpack_from('<I', d, tc.start)[0]
         if 4 + 6 * n != tc.end - tc.start:
             return
+        self._add_faces(verts, list(struct.iter_unpack('<3H', d[tc.start + 4:tc.end])))
+
+    def outline_of(self, record, m):
+        """Footprint of an instance record placed with matrix m (its template mesh), None when unknown."""
+        if self.templates is None:
+            return None
+        pts = [(_apply(m, v)[0], _apply(m, v)[2]) for verts, tris in self.templates.get(record.tpl, record.cls)
+               for v in verts]
+        return _hull(pts) if pts else None
+
+    def _add_faces(self, verts, tris):
         lx, ly, lz = LIGHT
         ll = math.sqrt(lx * lx + ly * ly + lz * lz)
         nv = len(verts)
@@ -206,7 +233,7 @@ class LevelView:
         self.vx.extend(v[0] for v in verts)
         self.vy.extend(v[1] for v in verts)
         self.vz.extend(v[2] for v in verts)
-        for a, b, c in struct.iter_unpack('<3H', d[tc.start + 4:tc.end]):
+        for a, b, c in tris:
             if a >= nv or b >= nv or c >= nv:
                 continue
             p, q, r = verts[a], verts[b], verts[c]
@@ -256,18 +283,34 @@ class LevelView:
         sx, sz = w / (x1 - x0), h / (z1 - z0)
         rgb = bytearray(b'\x1c\x1f\x24' * (w * h))
         hgt = array.array('f', [-1e9]) * (w * h)
-        span = max(self.ymax - self.ymin, 1.0)
-        for t in self.tris:
+        colors = self._tri_colors()
+        for t, col in zip(self.tris, colors):
             if cut is not None and t[1] > cut:
                 continue
             px = ((t[2] - x0) * sx, (t[4] - x0) * sx, (t[6] - x0) * sx)
             py = ((z1 - t[3]) * sz, (z1 - t[5]) * sz, (z1 - t[7]) * sz)
-            if max(px) < 0 or min(px) >= w or max(py) < 0 or min(py) >= h:
+            lo, hi = min(px), max(px)
+            if hi < 0 or lo >= w:
                 continue
-            light = t[8]
-            col = bytes(min(255, int(c * light)) for c in _ramp((t[9] - self.ymin) / span))
+            top, bottom = min(py), max(py)
+            if bottom < 0 or top >= h:
+                continue
+            if hi - lo < 1 and bottom - top < 1:          # smaller than a pixel (detail of an object): one pixel
+                i = int(top) * w + int(lo)
+                if 0 <= lo and 0 <= top:
+                    rgb[3 * i:3 * i + 3] = col
+                    hgt[i] = t[9]
+                continue
             _fill(rgb, hgt, array.array('f', [t[9]]), w, h, px, py, col)
         return rgb, hgt
+
+    def _tri_colors(self):
+        """Colour bytes of the top view triangles (height ramp times the light), computed once."""
+        if getattr(self, '_tcolors', None) is None:
+            span = max(self.ymax - self.ymin, 1.0)
+            self._tcolors = [bytes(min(255, int(c * t[8])) for c in _ramp((t[9] - self.ymin) / span))
+                             for t in self.tris]
+        return self._tcolors
 
     # ---- 3D view
     def face_colors(self):
@@ -347,9 +390,21 @@ class LevelView:
         todo.sort(reverse=True)
         rgb = bytearray(bytes(bg) * (w * h))
         ids = array.array('i', [-1]) * (w * h)
+        shades = {}                                       # (colour, fog step) -> bytes
         for depth, i, px, py in todo:
-            k = min(0.7, depth / 3 / fog)
-            col = bytes(int(v + (g - v) * k) for v, g in zip(colors[i], bg))
+            step = min(16, int(depth / 3 / fog / 0.7 * 16))   # the fog in 16 steps, up to 70 %
+            key = (colors[i], step)
+            col = shades.get(key)
+            if col is None:
+                k = 0.7 * step / 16
+                col = shades[key] = bytes(int(v + (g - v) * k) for v, g in zip(colors[i], bg))
+            lo, hi, top, bottom = min(px), max(px), min(py), max(py)
+            if hi - lo < 1 and bottom - top < 1:          # smaller than a pixel: one pixel
+                if 0 <= lo and 0 <= top:
+                    j = int(top) * w + int(lo)
+                    rgb[3 * j:3 * j + 3] = col
+                    ids[j] = i
+                continue
             _fill(rgb, ids, array.array('i', [i]), w, h, px, py, col)
         return rgb, ids
 
@@ -472,8 +527,50 @@ class Camera:
         self.target = tuple(t - r[k] * dx * m + fwd[k] * dy * m for k, t in enumerate(self.target))
 
 
+Instance = collections.namedtuple('Instance', 'chunk name tpl cls matrix mpos fchunk flags rest children')
+Instance.__doc__ = """An instance record of section 0x1b8: the record chunk 0x1b9 ('SNIA' name tpl cls \\0 + 16 floats,
+sometimes a property text 0x1ba inside) and the flags chunk 0x1bb that follows it. `mpos` is the offset of the
+matrix in the file, `flags` the flag names, `rest` the record bytes after the names (matrix + anything after it),
+`children` the record's child chunks as (tag, payload)."""
+
+
+class _Sections:
+    """Just the top sections a LevelFile-like reader needs (instance_records): parsing only these is fast."""
+
+    def __init__(self, data, tags):
+        self.data = data
+        self.top, self.chunks = [], []
+        for tag, a, b in _seq(data, 0, len(data)) or ():
+            c = Chunk()
+            c.tag, c.start, c.end, c.pre, c.children, c.parent = tag, a, b, 0, None, None
+            if tag in tags:
+                sub = _parse(data, a, b, c, 14)        # the records and their children only
+                if sub is not None:
+                    c.pre, c.children = sub
+            self.top.append(c)
+        stack = list(reversed(self.top))
+        while stack:
+            c = stack.pop()
+            self.chunks.append(c)
+            stack.extend(reversed(c.children or ()))
+
+
+def scan_instances(data):
+    """Instances of a level and the names of its prototypes (section 0x1ea), without parsing the whole file."""
+    lf = _Sections(data, (0x1b8, 0x1ea))
+    protos = set()
+    for c in lf.top:
+        if c.tag == 0x1ea:
+            for rec in c.children or ():
+                for k in rec.children or ():
+                    if k.tag == 0x2e5:
+                        raw = data[k.start:k.end]
+                        protos.add(_cstr(raw[4:] if raw.startswith(b'LPTA') else raw))
+    return list(instance_records(lf)), protos
+
+
 def instance_records(lf):
-    """Instance records (0x1b9) of a LevelFile: (chunk, name, template, class, matrix, matrix offset)."""
+    """Instance records (0x1b9) of a LevelFile, as Instance."""
     d = lf.data
     for c in lf.chunks:
         if c.tag != 0x1b9:
@@ -482,11 +579,90 @@ def instance_records(lf):
         if not raw.startswith(b'SNIA'):
             continue
         parts = raw[4:].split(b'\0', 3)               # 'SNIA' name\0 tpl\0 cls\0 \0 + 16 floats
-        if len(parts) < 4 or len(parts[3]) < 65:
+        if len(parts) < 4 or len(parts[3]) < 65 or any(k.children for k in c.children or ()):
             continue
         name, tpl, cls = (p.decode('latin1') for p in parts[:3])
-        yield (c, name, tpl, cls, struct.unpack_from('<16f', parts[3], 1),
-               c.start + 4 + sum(len(p) + 1 for p in parts[:3]) + 1)
+        sib = c.parent.children if c.parent is not None else lf.top
+        i = sib.index(c)
+        fchunk = sib[i + 1] if i + 1 < len(sib) and sib[i + 1].tag == 0x1bb else None
+        flags = tuple(t for t in _cstr(d[fchunk.start:fchunk.end]).split('&') if t) if fchunk else ()
+        yield Instance(c, name, tpl, cls, struct.unpack_from('<16f', parts[3], 1),
+                       c.start + 4 + sum(len(p) + 1 for p in parts[:3]) + 1, fchunk, flags, parts[3],
+                       [(k.tag, d[k.start:k.end]) for k in c.children or ()])
+
+
+def flags_payload(flags):
+    """Payload of a flags chunk 0x1bb: '&a&b' + NUL, or a single NUL."""
+    return ('&' + '&'.join(flags) if flags else '').encode('latin1') + b'\0'
+
+
+def edit_instances(lf, adds=(), deletes=(), flags=None):
+    """Level bytes with instances added / deleted and flags changed, all by instance name:
+        adds     [(new name, Instance to copy, matrix, flags)]  appended to the end of section 0x1b8
+        deletes  {name}
+        flags    {name: flags}
+    The record count at the start of section 0x1b8 follows."""
+    recs = {r.name: r for r in instance_records(lf)}
+    for name, *_rest in adds:
+        if name in recs:
+            raise ValueError('instance %s exists already' % name)
+    section = next((c for c in lf.top if c.tag == 0x1b8), None)
+    if section is None or section.pre != 4:
+        raise ValueError('unexpected instance section layout')
+    payloads, delete = {}, set()
+    for name, fl in (flags or {}).items():
+        r = recs.get(name)
+        if r is not None and r.fchunk is not None and name not in deletes:
+            payloads[r.fchunk] = flags_payload(fl)
+    for name in deletes:
+        r = recs.get(name)
+        if r is None:
+            raise ValueError('instance %s not found' % name)
+        delete.add(r.chunk)
+        if r.fchunk is not None:
+            delete.add(r.fchunk)
+    new = []
+    for name, src, m, fl in adds:
+        head = (b'SNIA' + b'\0'.join(s.encode('latin1') for s in (name, src.tpl, src.cls)) + b'\0'
+                + src.rest[:1] + struct.pack('<16f', *m) + src.rest[65:])
+        new.append((0x1b9, head, list(src.children)) if src.children else (0x1b9, head))
+        new.append((0x1bb, flags_payload(fl)))
+    keep = [k for k in section.children if k not in delete]
+    count = sum(1 for k in keep if k.tag == 0x1b9) + len(adds)
+    insert = {}
+    if new:
+        if not keep:
+            raise ValueError('cannot add to an empty instance section')
+        insert[keep[-1]] = new
+    prefix = struct.pack('<I', count)
+    return lf.rebuild(payloads=payloads, prefixes={section: prefix}, insert_after=insert, delete=delete)
+
+
+def unique_name(base, taken):
+    """A free instance name: start_posN keeps the numbering, others get _2, _3 ..."""
+    m = re.fullmatch(r'(start_pos)(\d+)', base) or re.fullmatch(r'(.*?)_(\d+)', base)
+    stem = m.group(1) + ('' if base.startswith('start_pos') else '_') if m else base + '_'
+    n = int(m.group(2)) + 1 if m else 2
+    while stem + str(n) in taken:
+        n += 1
+    return stem + str(n)
+
+
+def instance_kind(name, tpl, cls, flags):
+    ref = tpl or cls
+    if name.startswith('start_pos') or any(f in SPAWN_FLAGS for f in flags):
+        return 'start'
+    if any(f in FLAG_POS for f in flags):
+        return 'flag'
+    if name.startswith('veh_') or ref.lower().startswith('vhc_') or ref.lower() == 'bike':
+        return 'vehicle'
+    if name.startswith('item_') or ref.startswith('item_'):     # item_mp_*: weapons
+        return 'pickup'
+    if name.startswith(('sndActor', 'music')) or ref.startswith('snd_'):
+        return 'sound'
+    if not ref and '|' in name or ref.startswith('sob_flare') or 'sfx' in ref:   # s3d_refLocator12|flareActor
+        return 'effect'
+    return 'object'
 
 
 def matrix_yaw(m):
@@ -568,6 +744,120 @@ def _fill(rgb, buf, val, w, h, px, py, col):
         base = row * w
         rgb[3 * (base + c0):3 * (base + c1 + 1)] = col * n
         buf[base + c0:base + c1 + 1] = val * n
+
+
+PART_HIDDEN = {'glr', 'plrc', 'aiv', 'aic', 'ainv', 'ainc', 'vis', 'h'}    # collision hulls, AI helpers, emitters
+
+
+def _visible_part(flags):
+    """A part of a template worth drawing: not a collision hull, helper or transparent effect (the boost flame
+    of the bike is a 40 m cone). Unlike the level, &nc parts count (leaves of plants)."""
+    if flags.startswith('&dom_'):
+        return False
+    f = set(flags.replace(' ', '').split('&'))
+    return not (f & PART_HIDDEN or any(x.startswith(('tra', 'trp')) for x in f))
+
+
+def node_chain(d, node, stop):
+    """Matrix from a node's space to the space of `stop` (a template / prototype record): the 0xf9 matrices of
+    the node and its parents (row vectors, child first). Mesh vertices are in their node's space; in the scene of a
+    level the chains of mesh nodes are identity (the vertices are world), in templates they are not (the wheels of
+    the bike)."""
+    m, p = IDENT, node
+    while p is not None and p is not stop:
+        if _is_node(p):
+            k = _kids(p)
+            if 0xf9 in k and k[0xf9].end - k[0xf9].start == 64:
+                m = _mul(m, struct.unpack_from('<16f', d, k[0xf9].start))
+        p = p.parent
+    return m
+
+
+def node_mesh(d, k):
+    """(vertices, triangles) of a scene node (its children by tag), None without a valid mesh."""
+    vc, tc = k.get(0xf1), k.get(0xf2)
+    if vc is None or tc is None:
+        return None
+    nv = struct.unpack_from('<I', d, vc.start)[0]
+    nt = struct.unpack_from('<I', d, tc.start)[0]
+    if 4 + 12 * nv != vc.end - vc.start or 4 + 6 * nt != tc.end - tc.start:
+        return None
+    verts = list(struct.iter_unpack('<3f', d[vc.start + 4:vc.end]))
+    tris = [t for t in struct.iter_unpack('<3H', d[tc.start + 4:tc.end]) if max(t) < nv]
+    return verts, tris
+
+
+class TemplateMeshes:
+    """Meshes of templates (archive entries of type 12, the same 0x2e4 records as the prototypes of a level),
+    in the template's own space: {name: [(vertices, triangles)]}, read once."""
+
+    def __init__(self, game, lock=None):
+        self.game, self.lock, self.cache = game, lock, {}
+        self.arc = game.orig['main']
+
+    def get(self, *names):
+        """Meshes of the first name that is a template (an instance gives its template, then its class)."""
+        for name in names:
+            if not name:
+                continue
+            key = name.lower()
+            if key not in self.cache:
+                self.cache[key] = self._load(key)
+            if self.cache[key] is not None:
+                return self.cache[key]
+        return []
+
+    def _load(self, name):
+        e = self.arc.get(name, 12)
+        if e is None:
+            return None
+        try:
+            if self.lock is not None:
+                with self.lock:
+                    d = self.game.read_orig('main', e)
+            else:
+                d = self.game.read_orig('main', e)
+            r = _parse(d, 0, len(d), None, 0)
+        except Exception:                 # noqa: BLE001 - an unreadable template is drawn as a marker
+            return None
+        out = []
+        for top in (r[1] if r else ()):
+            for n in _walk_nodes(top):
+                k = _kids(n)
+                flags = _cstr(d[k[0x115].start:k[0x115].end]) if 0x115 in k else ''
+                mesh = node_mesh(d, k)
+                if mesh and _visible_part(flags):
+                    m = node_chain(d, n, top)
+                    if m != IDENT:
+                        mesh = ([_apply(m, v) for v in mesh[0]], mesh[1])
+                    out.append(mesh)
+        return out
+
+
+def template_meshes(game, lock=None):
+    """The TemplateMeshes of this game (kept between maps)."""
+    t = getattr(game, '_template_meshes', None)
+    if t is None:
+        t = game._template_meshes = TemplateMeshes(game, lock)
+    return t
+
+
+def mesh_thumbnail(meshes, w, h, yaw=35.0, pitch=25.0):
+    """A small shaded picture of template meshes (RGB bytes), None when there is nothing to draw."""
+    v = LevelView.__new__(LevelView)
+    v.vx, v.vy, v.vz, v.faces, v.tris, v._preview = [], [], [], [], [], None
+    for verts, tris in meshes:
+        v._add_faces(verts, tris)
+    if not v.faces:
+        return None
+    lo = [min(c) for c in (v.vx, v.vy, v.vz)]
+    hi = [max(c) for c in (v.vx, v.vy, v.vz)]
+    centre = tuple((a + b) / 2 for a, b in zip(lo, hi))
+    size = math.dist(lo, hi) or 1.0
+    v._colors = [tuple(int(c * f[4]) for c in (205, 200, 185)) for f in v.faces]
+    cam = Camera(centre, yaw, pitch, size * 1.5, fov=50.0)
+    rgb, _ids = v.render3d(cam, w, h)
+    return rgb
 
 
 def _solid(flags):
