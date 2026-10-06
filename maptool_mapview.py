@@ -3,10 +3,11 @@ import math
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 from tsmap import _
-from tsmap.mapview import Camera, LevelView, png_base64
+from tsmap.lg import LevelFile
+from tsmap.mapview import Camera, LevelView, instance_records, matrix_yaw, move_matrix, png_base64
 
 COLORS = {'start': '#4aa8ff', 'pickup': '#60d060', 'vehicle': '#ff9a2e', 'object': '#e8c84a', 'node': '#d080ff',
           'sound': '#9a9a9a', 'effect': '#b8a878', 'light': '#fff3a8'}
@@ -47,19 +48,28 @@ class MapWindow(tk.Toplevel):
         self._keys = set()         # movement keys held down
         self._move_job = None
         self._move_time = 0.0
+        self.moves = {}            # objects moved and not saved yet: {matrix offset: matrix} (saved by the Scripts tab)
+        self._loaded = {}          # matrix offset -> (pos, matrix, outline) as loaded, for "Undo move"
+        self._originals = {}       # level name -> {instance name: matrix} of the original game level
+        self._moving = None        # dragging an object: (object, grab dx, grab dz, height above the floor or None)
         self.title(_('Map'))
-        self.geometry('980x800')
+        self.geometry('1020x840')
         self._build()
+        self.protocol('WM_DELETE_WINDOW', self._close)
 
     # ------------------------------------------------------------------ layout
     def _build(self):
         bar = ttk.Frame(self, padding=(6, 6))
         bar.pack(fill='x')
         self.mode3d = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text='3D', variable=self.mode3d, command=self._toggle_3d).pack(side='left', padx=(0, 12))
+        ttk.Checkbutton(bar, text='3D', variable=self.mode3d, command=self._toggle_3d).pack(side='left', padx=(0, 8))
+        self.edit_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text=_('Move objects'), variable=self.edit_var,
+                        command=self._toggle_edit).pack(side='left', padx=(0, 12))
+        self.bar = bar
         ttk.Label(bar, text=_('Height cut:')).pack(side='left')
         self.cut_var = tk.DoubleVar()
-        self.cut_scale = ttk.Scale(bar, orient='horizontal', length=200, variable=self.cut_var,
+        self.cut_scale = ttk.Scale(bar, orient='horizontal', length=150, variable=self.cut_var,
                                    command=lambda v: self._on_cut())
         self.cut_scale.pack(side='left', padx=4)
         self.cut_label = ttk.Label(bar, width=8)
@@ -72,6 +82,36 @@ class MapWindow(tk.Toplevel):
             v = self.layers[key] = tk.BooleanVar(value=on)
             ttk.Checkbutton(bar, text=text, variable=v, command=self._draw).pack(side='left', padx=(10, 0))
         ttk.Button(bar, text=_('Fit'), command=self._fit).pack(side='right')
+
+        # object editing: shown with "Move objects"
+        self.edit_bar = ttk.Frame(self, padding=(6, 0, 6, 6))
+        ed = ttk.Frame(self.edit_bar)
+        ed.pack(fill='x')
+        ed2 = ttk.Frame(self.edit_bar)
+        ed2.pack(fill='x', pady=(4, 0))
+        self.edit_name = ttk.Label(ed, width=30, anchor='w')
+        self.edit_name.pack(side='left')
+        self.edit_vars = {}
+        for key in ('X', 'Y', 'Z', _('Angle')):
+            ttk.Label(ed, text=key).pack(side='left', padx=(6, 2))
+            v = self.edit_vars[key] = tk.StringVar()
+            e = ttk.Entry(ed, textvariable=v, width=7)
+            e.pack(side='left')
+            e.bind('<Return>', lambda ev: self._edit_set())
+        self.edit_buttons = [
+            ttk.Button(ed, text=_('Set'), command=self._edit_set, width=7),
+            ttk.Button(ed, text='⟲ 15°', command=lambda: self._edit_turn(15), width=6),
+            ttk.Button(ed, text='⟳ 15°', command=lambda: self._edit_turn(-15), width=6),
+            ttk.Button(ed2, text=_('On the floor'), command=self._edit_floor),
+            ttk.Button(ed2, text=_('Undo move'), command=self._edit_undo),
+            ttk.Button(ed2, text=_('Original position'), command=self._edit_original),
+        ]
+        for b in self.edit_buttons:
+            b.pack(side='left', padx=(4, 0) if b.master is ed else (0, 4))
+        ttk.Button(ed2, text=_('Save and apply to the game'), command=lambda: self.tab.save(apply=True)).pack(side='right')
+        ttk.Button(ed2, text=_('Save'), command=self.tab.save).pack(side='right', padx=4)
+        self.moved_label = ttk.Label(ed2, foreground='#b05000')
+        self.moved_label.pack(side='right', padx=6)
 
         self.canvas = tk.Canvas(self, background='#1c1f24', highlightthickness=0, cursor='crosshair')
         self.canvas.pack(fill='both', expand=True)
@@ -111,9 +151,13 @@ class MapWindow(tk.Toplevel):
         self.hint.configure(text=_('Drag: rotate around the point under the cursor, Shift+drag or middle button: move, '
                                    'wheel: zoom, double click: centre on that point, right click: copy coordinates') + '\n'
                             + _('WASD / arrows: move, Q / E: down / up, Shift: faster')
+                            + ('   ' + _('Drag an object to move it, R / Shift+R: turn it by 15°')
+                               if self.edit_var.get() else '')
                             if self.mode3d.get() else
                             _('Wheel: zoom, drag: move, right click: copy coordinates') + '\n'
-                            + _('WASD / arrows: move, Shift: faster'))
+                            + _('WASD / arrows: move, Shift: faster')
+                            + ('   ' + _('Drag an object to move it, R / Shift+R: turn it by 15°')
+                               if self.edit_var.get() else ''))
 
     # ------------------------------------------------------------------ level
     def set_level(self, cls, level):
@@ -133,6 +177,8 @@ class MapWindow(tk.Toplevel):
             return
         self.view = view
         self.picks = None
+        self.moves.clear()                  # a new level (or the saved one): nothing is moved in it yet
+        self._loaded = {}
         threading.Thread(target=view.prepare_3d, daemon=True).start()
         sel = self.selected
         self.selected = None
@@ -148,6 +194,7 @@ class MapWindow(tk.Toplevel):
         self.status.set(_('%s: %d triangles, %d objects', cls, len(view.tris), len(view.objects)))
         if self.mode3d.get() and self.cam is None:
             self._reset_camera()
+        self._fill_edit()
         self._changed(fit=not keep)
         if self._pending is not None:
             index, self._pending = self._pending, None
@@ -408,6 +455,20 @@ class MapWindow(tk.Toplevel):
             c.create_oval(px - 10, py - 10, px + 10, py + 10, outline='#ffffff', width=2, tags='ov')
             c.create_text(px + 13, py - 12, text=o.name, anchor='w', fill='#ffffff', font=('Segoe UI', 9, 'bold'),
                           tags='ov')
+        if self.edit_var.get():
+            for o in self.view.objects:                   # where the moved objects were: a dashed line
+                if o.mpos in self.moves and o.mpos in self._loaded:
+                    a, b = self._screen(*self._loaded[o.mpos][0]), self._screen(*o.pos)
+                    if a and b:
+                        c.create_line(a[0], a[1], b[0], b[1], fill='#ff9a2e', dash=(3, 3), tags='ov')
+                        c.create_oval(a[0] - 3, a[1] - 3, a[0] + 3, a[1] + 3, outline='#ff9a2e', tags='ov')
+            o = self._editable()
+            if o is not None:                             # heading: the object's local Z axis
+                n = math.hypot(o.matrix[8], o.matrix[10]) or 1.0
+                tip = (o.pos[0] + 1.5 * o.matrix[8] / n, o.pos[1], o.pos[2] + 1.5 * o.matrix[10] / n)
+                a, b = self._screen(*o.pos), self._screen(*tip)
+                if a and b:
+                    c.create_line(a[0], a[1], b[0], b[1], fill='#ffffff', width=2, arrow='last', tags='ov')
         p = self._pivot is not None and self.mode3d.get() and self._screen(*self._pivot)
         if p:                                         # the point the camera turns around while dragging
             px, py = p
@@ -437,7 +498,7 @@ class MapWindow(tk.Toplevel):
             for a, b in zip(bottom, top):                 # vertical edges
                 c.create_line(a[0], a[1], b[0], b[1], fill=col, width=width, dash=dash, tags=tags)
 
-    def _object_at(self, px, py):
+    def _object_at(self, px, py, markers_only=False):
         """The object under the cursor: the nearest marker, else the smallest outline that contains the point."""
         best, dist = None, 9.0
         for item in self.canvas.find_overlapping(px - 6, py - 6, px + 6, py + 6):
@@ -451,7 +512,7 @@ class MapWindow(tk.Toplevel):
             d = math.hypot(p[0] - px, p[1] - py)
             if d < dist:
                 best, dist = o, d
-        if best is not None:
+        if best is not None or markers_only:
             return best
         if self.mode3d.get():
             p = self.pick(px, py)
@@ -483,6 +544,7 @@ class MapWindow(tk.Toplevel):
             return
         o = self.view.by_text.get(index)
         self.selected = o
+        self._fill_edit()
         if o is None:
             self.status.set(_('This object has no position on the map'))
             self._draw()
@@ -499,6 +561,176 @@ class MapWindow(tk.Toplevel):
         else:
             self._draw()
         self.status.set(self._describe(o))
+
+    # ------------------------------------------------------------------ moving objects
+    # Only instances (0x1b9 records: start points, pickups, vehicles, objects, effects, sounds) can be moved: their
+    # matrix is changed in place. Zones and static geometry are part of the level's spatial grid (0x21f) and of
+    # its collision files, so they stay where they are.
+    def _toggle_edit(self):
+        if self.edit_var.get():
+            self.edit_bar.pack(fill='x', after=self.bar)
+        else:
+            self.edit_bar.pack_forget()
+        self._show_hint()
+        self._fill_edit()
+        self._draw()
+
+    def _editable(self):
+        o = self.selected
+        return o if self.edit_var.get() and o is not None and o.movable else None
+
+    def _fill_edit(self):
+        """Show the selected object in the edit bar."""
+        o = self._editable()
+        self.moved_label.configure(text=_('Moved: %d', len(self.moves)) if self.moves else '')
+        state = ['!disabled'] if o else ['disabled']
+        for b in self.edit_buttons:
+            b.state(state)
+        if o is None:
+            self.edit_name.configure(text=_('Select an object to move') if self.edit_var.get() else '')
+            for v in self.edit_vars.values():
+                v.set('')
+            return
+        self.edit_name.configure(text=o.name + (' ●' if o.mpos in self.moves else ''))
+        for key, val in zip(('X', 'Y', 'Z', _('Angle')), (*o.pos, matrix_yaw(o.matrix))):
+            self.edit_vars[key].set('%.2f' % val if key != _('Angle') else '%.0f' % val)
+
+    def _set_matrix(self, o, m):
+        """Move / turn an instance on the map; the move is saved together with the Scripts tab edits."""
+        if o.mpos not in self._loaded:
+            self._loaded[o.mpos] = (o.pos, o.matrix, o.outline)
+        pos0, m0, outline0 = self._loaded[o.mpos]
+        if o.outline and outline0:                        # the outline follows: turn around the old origin, move
+            turn = math.radians(matrix_yaw(m) - matrix_yaw(m0))
+            c, s = math.cos(turn), math.sin(turn)
+            o.outline = [(m[12] + (x - pos0[0]) * c + (z - pos0[2]) * s,
+                          m[14] - (x - pos0[0]) * s + (z - pos0[2]) * c) for x, z in outline0]
+        o.matrix, o.pos = tuple(m), tuple(m[12:15])
+        if all(abs(a - b) < 1e-6 for a, b in zip(m, m0)):
+            self.moves.pop(o.mpos, None)
+        else:
+            self.moves[o.mpos] = o.matrix
+        self.tab.moves_changed()
+        self._fill_edit()
+        self._draw()
+
+    def _floor_offset(self, o):
+        """How high the object stands above the floor where it was loaded (kept when it is moved)."""
+        pos0 = self._loaded.get(o.mpos, (o.pos,))[0]
+        f = self.view.floor_at(pos0[0], pos0[2], pos0[1] + 0.5)
+        return pos0[1] - f if f is not None and 0 <= pos0[1] - f <= 1.5 else None
+
+    def _edit_set(self):
+        o = self._editable()
+        if o is None:
+            return
+        try:
+            x, y, z, a = (float(self.edit_vars[k].get().replace(',', '.')) for k in ('X', 'Y', 'Z', _('Angle')))
+        except ValueError:
+            self.status.set(_('Position: numbers expected'))
+            return
+        self._set_matrix(o, move_matrix(o.matrix, (x, y, z), a - matrix_yaw(o.matrix)))
+
+    def _edit_turn(self, deg):
+        o = self._editable()
+        if o is not None:
+            self._set_matrix(o, move_matrix(o.matrix, o.pos, deg))
+
+    def _edit_floor(self):
+        o = self._editable()
+        if o is None:
+            return
+        f = self.view.floor_at(o.pos[0], o.pos[2], o.pos[1] + 1.0)
+        if f is None:
+            self.status.set(_('No floor under %s', o.name))
+            return
+        off = self._floor_offset(o)
+        self._set_matrix(o, move_matrix(o.matrix, (o.pos[0], f + (off if off is not None else 0.0), o.pos[2])))
+
+    def _edit_undo(self):
+        o = self._editable()
+        if o is not None and o.mpos in self._loaded:
+            self._set_matrix(o, self._loaded[o.mpos][1])
+
+    def _edit_original(self):
+        """Put the object where the original game level has it (the level is read once per map)."""
+        o = self._editable()
+        if o is None:
+            return
+        cls, game = self.cls, self.app.game
+        if cls in self._originals:
+            self._place_original(o, self._originals[cls])
+            return
+
+        def work():
+            try:
+                with self.app.lock:
+                    data = game.level_data(cls, original=True)
+                mats = {}
+                for _c, name, _t, _k, m, _p in instance_records(LevelFile(data)):
+                    mats.setdefault(name, m)
+            except Exception as e:                          # noqa: BLE001 - reported in the status line
+                msg = str(e)
+                self.app.msgs.put(('call', lambda: self.status.set(msg)))
+                return
+            self.app.msgs.put(('call', lambda: (self._originals.__setitem__(cls, mats),
+                                                self.winfo_exists() and self._place_original(o, mats))))
+        self.status.set(_('Loading %s ...', cls))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _place_original(self, o, mats):
+        if o.name not in mats or o not in self.view.objects:
+            self.status.set(_('%s is not in the original level', o.name))
+            return
+        self._set_matrix(o, mats[o.name])
+        self.status.set(self._describe(o))
+
+    def _close(self):
+        if self.moves and not messagebox.askyesno(_('Map'), _('Discard %d moved objects?', len(self.moves))):
+            return
+        self.moves.clear()
+        self.destroy()
+        self.tab.moves_changed()
+
+    def _world_under(self, px, py, height):
+        """World (x, z) under a canvas point: the top view, or the 3D plane Y = height."""
+        if self.mode3d.get():
+            w, h = self._size()
+            p = self.cam.ground(w, h, px + 0.5, py + 0.5, height)
+            return (p[0], p[2]) if p else None
+        return self.to_world(px, py)
+
+    def _start_moving(self, e):
+        """Edit mode: a press on a movable object starts moving it. True when it did."""
+        if not self.edit_var.get() or e.state & 0x1:
+            return False
+        o = self._object_at(e.x, e.y, markers_only=True)
+        if o is None or not o.movable:
+            return False
+        p = self._world_under(e.x, e.y, o.pos[1])
+        if p is None:
+            return False
+        self.selected = o
+        self._moving = (o, o.pos[0] - p[0], o.pos[2] - p[1], o.pos[1], self._floor_offset(o))
+        self._fill_edit()
+        self.status.set(self._describe(o))
+        if o.texts:
+            self.tab.show_object(o.texts[0])
+        return True
+
+    def _move_to(self, e):
+        o, gx, gz, y0, off = self._moving
+        p = self._world_under(e.x, e.y, y0)            # 3D: the plane at the height the drag started from
+        if p is None:
+            return
+        x, z, y = p[0] + gx, p[1] + gz, y0
+        if off is not None:
+            # onto the highest floor at the new place that is at most 0.5 m above where the object was
+            # (a stair or a low step, not a roof); does not depend on the way it was dragged
+            f = self.view.floor_at(x, z, y0 + 0.5)
+            if f is not None:
+                y = f + off
+        self._set_matrix(o, move_matrix(o.matrix, (x, y, z)))
 
     # ------------------------------------------------------------------ mouse
     def _on_wheel(self, e):
@@ -519,6 +751,9 @@ class MapWindow(tk.Toplevel):
         self.canvas.focus_set()                   # for the movement keys
         self._drag = (e.x, e.y, e.x, e.y)
         self._pivot = None
+        self._moving = None
+        if self.view and getattr(e, 'num', 1) == 1 and self._start_moving(e):
+            return
         if self.view and self.mode3d.get():
             # turn around the point under the cursor; where nothing is drawn (or the full image is not ready),
             # around the point where the cursor ray meets the ground plane at the height of the target
@@ -527,6 +762,11 @@ class MapWindow(tk.Toplevel):
 
     # ------------------------------------------------------------------ keyboard
     def _key_down(self, e):
+        if isinstance(getattr(e, 'widget', None), (tk.Entry, ttk.Entry)):
+            return                                # typing a coordinate
+        if e.keycode == 82 and self._editable():  # R / Shift+R: turn the object being edited
+            self._edit_turn(-15 if e.state & 0x1 else 15)
+            return
         key = MOVE_KEYS.get(e.keycode)
         if key is None or not self.view:
             return
@@ -575,6 +815,9 @@ class MapWindow(tk.Toplevel):
             return                                # still a click
         dx, dy = e.x - lx, e.y - ly
         self._drag = (x0, y0, e.x, e.y)
+        if self._moving:
+            self._move_to(e)
+            return
         if self.mode3d.get():
             if pan or e.state & 0x1:              # middle button or Shift: move the point the camera looks at
                 self._pivot = None
@@ -593,10 +836,16 @@ class MapWindow(tk.Toplevel):
         if self._pivot is not None:
             self._pivot = None
             self._draw()
+        if self._moving:
+            if drag and (drag[2], drag[3]) != (drag[0], drag[1]):
+                self._move_to(e)
+            self._moving = None
+            return
         if not drag or not self.view or (drag[2], drag[3]) != (drag[0], drag[1]) or not select:
             return
         o = self._object_at(e.x, e.y)
         self.selected = o
+        self._fill_edit()
         self._draw()
         if o is None:
             return

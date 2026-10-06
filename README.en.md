@@ -135,6 +135,16 @@ The **Map** button shows the map selected on the **Scripts** tab from above.
   property text: `DOMAIN { height = N }`. In 3D such zones are drawn as prisms N metres high, zones without
   that block (fog, grass, some sound zones) as a dotted outline: the game uses its own default for them.
   The zone height is shown in the hover text.
+- **Moving objects.** The **Move objects** switch lets you move and turn start points, pickups, vehicles
+  and other instance objects: drag a marker (in 2D and 3D), R / Shift+R turns it by 15°, or type X, Y, Z and
+  the angle in the bar. A dragged object lands on the highest floor at the new place that is at most 0.5 m
+  above its old position, and keeps its height above the floor. **On the floor** drops the selected
+  object, **Undo move** puts it back where it was before it was moved, **Original position** where the
+  original game level has it. The arrow shows the object's local Z axis; for start points it is the
+  direction the player faces after spawning (checked in game). Moves are saved together with the script
+  edits (**Save** in the map window or on the **Scripts** tab). Only the matrix of the record changes in the
+  file, the level keeps its size. Zones, walls and other static geometry cannot be moved: they are part of the level's spatial
+  grid and of its collision files. The geometry of doors and gates moves in the picture after saving.
 
 X points right and Z up. Whether this matches the game or is mirrored has not been checked yet.
 

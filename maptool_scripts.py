@@ -6,6 +6,7 @@ from tkinter import messagebox, ttk
 
 from tsmap import MapToolError, _
 from tsmap.lg import LevelFile, check_script
+from tsmap.mapview import apply_moves
 from maptool_mapview import MapWindow
 
 KEYWORDS = r'\b(override|func|if|else|end|return|var|not|and|or|true|false|while|for)\b'
@@ -168,7 +169,11 @@ class ScriptsTab(ttk.Frame):
 
     def unsaved(self):
         self._store_current()
-        return bool(self.edits)
+        return bool(self.edits or self._moves())
+
+    def _moves(self):
+        """Objects moved on the map and not saved yet: {matrix offset: matrix}."""
+        return self.map_win.moves if self._map_open() else {}
 
     def _on_map(self, event=None):
         i = self.map_box.current()
@@ -277,6 +282,10 @@ class ScriptsTab(ttk.Frame):
         if self.current is not None:
             self.map_win.highlight_text(self.current)
 
+    def moves_changed(self):
+        """The map window moved an object or dropped a move."""
+        self._update_state()
+
     def show_object(self, idx):
         """An object was clicked on the map: select it in the list (the filters are cleared when they hide it)."""
         if not self.tree.exists(str(idx)):
@@ -307,10 +316,13 @@ class ScriptsTab(ttk.Frame):
             self.tree.item(str(idx), values=vals, tags=('changed',) if changed else ())
 
     def _update_state(self):
+        moves = len(self._moves()) if self.level else 0
         if not self.level:
             self.state_var.set('')
-        elif self.edits:
-            self.state_var.set(_('Changed objects: %d (not saved)', len(self.edits)))
+        elif self.edits or moves:
+            self.state_var.set(', '.join(
+                ([_('Changed objects: %d (not saved)', len(self.edits))] if self.edits else [])
+                + ([_('Moved objects: %d (not saved)', moves)] if moves else [])))
         elif self.saved_edited:
             self.state_var.set(_('This level has saved edits'))
         else:
@@ -373,11 +385,16 @@ class ScriptsTab(ttk.Frame):
         self._mark_row(self.current)
         self._update_state()
 
+    def save(self, apply=False):
+        """Save the text edits and the objects moved on the map together (called by the map window too)."""
+        self._save(apply)
+
     def _save(self, apply=False):
         if not self.level:
             return
         self._store_current()
-        if not self.edits and not apply:
+        moves = dict(self._moves())
+        if not self.edits and not moves and not apply:
             return
         problems = []
         for idx, text in self.edits.items():
@@ -390,23 +407,33 @@ class ScriptsTab(ttk.Frame):
                                                 + '\n\n' + _('Save anyway?')):
             return
         try:
-            data = self.level.replace_texts(self.edits) if self.edits else None
+            for idx, text in self.edits.items():
+                self.level.encode_text(self.level.objects[idx], text)
         except UnicodeEncodeError:
             messagebox.showerror(_('Error'), _('The text contains characters the game cannot store (use Latin letters only).'))
             return
-        cls, game = self.cls, self.app.game
-        n = len(self.edits)
+        cls, game, level, edits = self.cls, self.app.game, self.level, dict(self.edits)
 
         def fn():
+            data = None
+            if moves:                                # same size: the matrices are written in place first
+                data = apply_moves(level.data, moves)
+            if edits:                                # the object indices do not change with the moves
+                data = (LevelFile(data) if data else level).replace_texts(edits)
             if data is not None:
                 LevelFile(data)                      # the result must parse again before it is stored
                 game.save_level_override(cls, data, self.app._say)
-                self.app._say(_('%s: %d objects changed', cls, n))
+                if edits:
+                    self.app._say(_('%s: %d objects changed', cls, len(edits)))
+                if moves:
+                    self.app._say(_('%s: %d objects moved', cls, len(moves)))
             if apply:
                 game.apply(self.app._say)
         def done(err):
             if not err:                              # reload the saved level; keep the edits on failure
                 self.edits = {}
+                if self._map_open():
+                    self.map_win.moves.clear()
                 self.cls = None
                 self.load_map(cls)
         self.app._run(_('Saving scripts'), fn, done=done)
@@ -424,6 +451,8 @@ class ScriptsTab(ttk.Frame):
         def done(err):
             if not err:
                 self.edits = {}
+                if self._map_open():
+                    self.map_win.moves.clear()
                 self.cls = None
                 self.load_map(cls)
         self.app._run(_('Restoring the level'), fn, done=done)

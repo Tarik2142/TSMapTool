@@ -67,12 +67,18 @@ def _hull(points):
 
 class MapObject:
     """kind: zone, node, start, pickup, vehicle, sound, effect, object, light."""
-    __slots__ = ('kind', 'name', 'template', 'pos', 'outline', 'texts', 'height')
+    __slots__ = ('kind', 'name', 'template', 'pos', 'outline', 'texts', 'height', 'matrix', 'mpos')
 
     def __init__(self, kind, name, template, pos, outline=None):
         self.kind, self.name, self.template, self.pos, self.outline = kind, name, template, pos, outline
         self.texts = []            # indices of LevelFile.objects (property texts) that belong to this object
         self.height = None         # zones: DOMAIN { height } above the flat outline, None when not set
+        self.matrix = None         # instances: the 4x4 matrix of the record (16 floats) ...
+        self.mpos = None           # ... and its offset in the level file (it can be changed in place)
+
+    @property
+    def movable(self):
+        return self.mpos is not None
 
 
 def _kids(c):
@@ -131,17 +137,7 @@ class LevelView:
                 self.objects.append(o)
 
         # instances
-        for c in lf.chunks:
-            if c.tag != 0x1b9:
-                continue
-            raw = d[c.start:c.start + c.pre] if c.children else d[c.start:c.end]
-            if not raw.startswith(b'SNIA'):
-                continue
-            parts = raw[4:].split(b'\0', 3)
-            if len(parts) < 4 or len(parts[3]) < 65:
-                continue
-            name, tpl, cls = (p.decode('latin1') for p in parts[:3])
-            m = struct.unpack_from('<16f', parts[3], 1)
+        for c, name, tpl, cls, m, mpos in instance_records(lf):
             ref = tpl or cls
             kind = ('start' if name.startswith('start_pos') else 'vehicle' if name.startswith('veh_')
                     else 'pickup' if name.startswith('item_') or ref.startswith('item_')     # item_mp_*: weapons
@@ -150,6 +146,7 @@ class LevelView:
                                       or ref.startswith('sob_flare') or 'sfx' in ref)
                     else 'object')
             o = MapObject(kind, name, ref, m[12:15])
+            o.matrix, o.mpos = m, mpos
             o.texts = [text_index[t] for t in c.children or () if t.tag == TEXT and t in text_index]
             proto = protos.get(tpl)
             if proto is not None:
@@ -356,6 +353,29 @@ class LevelView:
             _fill(rgb, ids, array.array('i', [i]), w, h, px, py, col)
         return rgb, ids
 
+    def floor_at(self, x, z, below):
+        """Height of the highest surface at (x, z) that is not above `below`, None when there is none."""
+        vx, vy, vz = self.vx, self.vy, self.vz
+        best = None
+        for a, b, c in (f[:3] for f in self.faces):
+            x0, x1, x2 = vx[a], vx[b], vx[c]
+            if (x < x0 and x < x1 and x < x2) or (x > x0 and x > x1 and x > x2):
+                continue
+            z0, z1, z2 = vz[a], vz[b], vz[c]
+            if (z < z0 and z < z1 and z < z2) or (z > z0 and z > z1 and z > z2):
+                continue
+            den = (z1 - z2) * (x0 - x2) + (x2 - x1) * (z0 - z2)
+            if abs(den) < 1e-9:
+                continue                                   # a vertical face
+            l0 = ((z1 - z2) * (x - x2) + (x2 - x1) * (z - z2)) / den
+            l1 = ((z2 - z0) * (x - x2) + (x0 - x2) * (z - z2)) / den
+            if l0 < -1e-6 or l1 < -1e-6 or l0 + l1 > 1 + 1e-6:
+                continue
+            y = l0 * vy[a] + l1 * vy[b] + (1 - l0 - l1) * vy[c]
+            if y <= below and (best is None or y > best):
+                best = y
+        return best
+
     def pick(self, cam, w, h, ids, px, py):
         """World point under pixel (px, py) of a render3d image, or None."""
         if not (0 <= px < w and 0 <= py < h):
@@ -450,6 +470,50 @@ class Camera:
         n = math.hypot(f[0], f[2]) or 1.0
         fwd = (f[0] / n, 0.0, f[2] / n)
         self.target = tuple(t - r[k] * dx * m + fwd[k] * dy * m for k, t in enumerate(self.target))
+
+
+def instance_records(lf):
+    """Instance records (0x1b9) of a LevelFile: (chunk, name, template, class, matrix, matrix offset)."""
+    d = lf.data
+    for c in lf.chunks:
+        if c.tag != 0x1b9:
+            continue
+        raw = d[c.start:c.start + c.pre] if c.children else d[c.start:c.end]
+        if not raw.startswith(b'SNIA'):
+            continue
+        parts = raw[4:].split(b'\0', 3)               # 'SNIA' name\0 tpl\0 cls\0 \0 + 16 floats
+        if len(parts) < 4 or len(parts[3]) < 65:
+            continue
+        name, tpl, cls = (p.decode('latin1') for p in parts[:3])
+        yield (c, name, tpl, cls, struct.unpack_from('<16f', parts[3], 1),
+               c.start + 4 + sum(len(p) + 1 for p in parts[:3]) + 1)
+
+
+def matrix_yaw(m):
+    """Heading of an instance in degrees: its local Z axis (row 2), 0 = +Z, as the camera yaw."""
+    return math.degrees(math.atan2(m[8], m[10])) % 360
+
+
+def move_matrix(m, pos, turn=0.0):
+    """Matrix m moved to `pos` and turned by `turn` degrees around the vertical axis (tilt and scale kept)."""
+    a = math.radians(turn)
+    c, s = math.cos(a), math.sin(a)
+    out = list(m)
+    for row in range(3):
+        x, y, z = m[row * 4:row * 4 + 3]
+        out[row * 4:row * 4 + 3] = (x * c + z * s, y, -x * s + z * c)
+    out[12:15] = pos
+    return tuple(out)
+
+
+def apply_moves(data, moves):
+    """Level data with the instance matrices {offset: 16 floats} written in place (the size does not change)."""
+    out = bytearray(data)
+    for pos, m in moves.items():
+        if out[pos - 1] != 0:
+            raise ValueError('not an instance matrix at %d' % pos)
+        struct.pack_into('<16f', out, pos, *m)
+    return bytes(out)
 
 
 def zone_height(text):
