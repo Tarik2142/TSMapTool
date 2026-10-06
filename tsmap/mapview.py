@@ -17,11 +17,14 @@ import re
 import struct
 import zlib
 
+from . import native
 from .lg import TEXT, Chunk, _cstr, _parse, _seq
 
 IDENT = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
 LIGHT = (-0.45, 0.8, 0.4)          # direction to the light: from the upper left of the view
-PREVIEW_FACES = 12000             # faces drawn while the 3D camera moves
+PREVIEW_FACES = 12000             # faces drawn while the 3D camera moves (Python drawing only)
+CANCEL_EVERY = 2048               # the Python drawing asks `cancel` after so many triangles
+BG = (0x1c, 0x1f, 0x24)           # background of the images
 HIDDEN_FLAGS = {'vis', 'nc', 'plrc', 'aiv', 'aic', 'ainv', 'ainc'}
 # instance flags (chunk 0x1bb after the record): spawn points by team, CTF flag positions, game mode filters
 SPAWN_FLAGS = ('swMP_SP_NONTEAM', 'swMP_SP_TEAM1', 'swMP_SP_TEAM2')
@@ -113,6 +116,7 @@ class LevelView:
         self.faces = []            # (a, b, c, y min, light, y mean): vertex indices, front side counter-clockwise
         self._colors = None
         self._preview = None
+        self._packed = {}          # arrays for the C drawing (tsmap/native), built on first use
         text_index = {o.chunk: o.index for o in lf.objects}
         sections = {c.tag: c for c in lf.top}
 
@@ -276,15 +280,22 @@ class LevelView:
         ys = [o.pos[1] for o in self.objects if o.kind in ('start', 'pickup', 'vehicle')]
         return max(ys) + 3.0 if ys else None
 
-    def render(self, view, w, h, cut=None):
+    def render(self, view, w, h, cut=None, cancel=None):
         """Height-shaded top view of `view` = (x0, z0, x1, z1) at w x h pixels, triangles drawn from low to high.
-        `cut` hides triangles that are entirely above that height. Returns (rgb bytearray, heights array)."""
+        `cut` hides triangles that are entirely above that height. Returns (rgb bytearray, heights array), None
+        when `cancel()` turned true meanwhile (asked by the slow Python drawing only)."""
         x0, z0, x1, z1 = view
         sx, sz = w / (x1 - x0), h / (z1 - z0)
-        rgb = bytearray(b'\x1c\x1f\x24' * (w * h))
+        rgb = bytearray(bytes(BG) * (w * h))
         hgt = array.array('f', [-1e9]) * (w * h)
+        if native.lib is not None:
+            tris, colors = self._packed2d()
+            native.render2d(tris, colors, len(self.tris), x0, z1, sx, sz, cut, w, h, rgb, hgt)
+            return rgb, hgt
         colors = self._tri_colors()
-        for t, col in zip(self.tris, colors):
+        for n, (t, col) in enumerate(zip(self.tris, colors)):
+            if cancel is not None and n % CANCEL_EVERY == 0 and cancel():
+                return None
             if cut is not None and t[1] > cut:
                 continue
             px = ((t[2] - x0) * sx, (t[4] - x0) * sx, (t[6] - x0) * sx)
@@ -312,6 +323,40 @@ class LevelView:
                              for t in self.tris]
         return self._tcolors
 
+    def _packed2d(self):
+        """Top view triangles for the C drawing: 8 doubles each (y min, x0, z0, x1, z1, x2, z2, y mean) and the
+        colours, 3 bytes each."""
+        if '2d' not in self._packed:
+            height = array.array('d', [t[9] for t in self.tris])
+            colors = native.shade(array.array('d', [t[8] for t in self.tris]), height, self.ymin,
+                                  max(self.ymax - self.ymin, 1.0), RAMP)
+            self._packed['2d'] = (array.array('d', [v for t in self.tris for v in (t[1],) + t[2:8] + (t[9],)]),
+                                  colors)
+        return self._packed['2d']
+
+    def _packed3d(self):
+        """The mesh for the C drawing: vertices (3 double arrays), faces (3 ints each), y min of every face
+        (doubles) and the colours (3 bytes each)."""
+        if '3d' not in self._packed:
+            if self._colors is None:
+                colors = native.shade(array.array('d', [f[4] for f in self.faces]),
+                                      array.array('d', [f[5] for f in self.faces]), self.ymin,
+                                      max(self.ymax - self.ymin, 1.0), RAMP)
+            else:                                  # set by the caller (mesh_thumbnail)
+                colors = bytearray(b''.join(bytes(c) for c in self._colors))
+            self._packed['3d'] = (array.array('d', self.vx), array.array('d', self.vy), array.array('d', self.vz),
+                                  array.array('i', [v for f in self.faces for v in f[:3]]),
+                                  array.array('d', [f[3] for f in self.faces]), colors)
+        return self._packed['3d']
+
+    def prepare(self):
+        """Build what the drawing needs ahead of time (in the thread that made the view): the arrays for the C
+        drawing, or the top view colours for the Python one."""
+        if native.lib is not None:
+            self._packed2d()
+            self._packed3d()
+        else:
+            self._tri_colors()
     # ---- 3D view
     def face_colors(self):
         """Colour of every face: height ramp times the light (the camera does not change it)."""
@@ -323,7 +368,10 @@ class LevelView:
 
     def prepare_3d(self):
         """Build the face colours and the preview mesh ahead of time (they take a moment on big levels)."""
-        self._preview_mesh()
+        if native.lib is not None:
+            self._packed3d()
+        else:
+            self._preview_mesh()
 
     def _preview_mesh(self):
         """The PREVIEW_FACES largest faces with their own vertex lists: (vx, vy, vz, faces, colors)."""
@@ -353,14 +401,26 @@ class LevelView:
             self._preview = (pvx, pvy, pvz, faces, [colors[i] for i in keep])
         return self._preview
 
-    def render3d(self, cam, w, h, cut=None, preview=False):
+    def render3d(self, cam, w, h, cut=None, preview=False, cancel=None):
         """Perspective view from Camera `cam` at w x h pixels: back faces culled, the rest drawn from far to near
-        (painter's algorithm). `preview` draws only the largest faces (while the camera moves).
-        Returns (rgb bytearray, face index per pixel array, -1 = empty; the index is valid without preview)."""
+        (painter's algorithm). `preview` draws only the largest faces (while the camera moves) when the drawing
+        is done in Python; the C drawing is fast enough to draw them all.
+        Returns (rgb bytearray, face index per pixel array, -1 = empty; the index is valid without preview), None
+        when `cancel()` turned true meanwhile (asked by the slow Python drawing only)."""
         (ex, ey, ez), (rx, ry, rz), (ux, uy, uz), (fx, fy, fz) = cam.basis()
         foc = cam.focal(w)
         cx, cy = w / 2, h / 2
         near = 0.1
+        bg = BG
+        fog = cam.dist * 4 + 50
+        if native.lib is not None:
+            rgb = bytearray(bytes(bg) * (w * h))
+            ids = array.array('i', [-1]) * (w * h)
+            if self.faces:
+                vx, vy, vz, faces, ylo, colors = self._packed3d()
+                basis = array.array('d', (ex, ey, ez, rx, ry, rz, ux, uy, uz, fx, fy, fz, foc))
+                native.render3d(vx, vy, vz, faces, ylo, colors, basis, cut, fog, bytearray(bg), w, h, rgb, ids)
+            return rgb, ids
         if preview:
             vx, vy, vz, faces, colors = self._preview_mesh()
         else:
@@ -371,10 +431,10 @@ class LevelView:
         Z = [(x - ex) * fx + (y - ey) * fy + (z - ez) * fz for x, y, z in zip(vx, vy, vz)]
         SX = [cx + x * foc / z if z > near else None for x, z in zip(X, Z)]
         SY = [cy - y * foc / z if z > near else None for y, z in zip(Y, Z)]
-        bg = (0x1c, 0x1f, 0x24)
-        fog = cam.dist * 4 + 50
         todo = []
         for i in range(len(faces)):
+            if cancel is not None and i % CANCEL_EVERY == 0 and cancel():
+                return None
             a, b, c, ylo = faces[i][:4]
             if cut is not None and ylo > cut:
                 continue
@@ -391,7 +451,9 @@ class LevelView:
         rgb = bytearray(bytes(bg) * (w * h))
         ids = array.array('i', [-1]) * (w * h)
         shades = {}                                       # (colour, fog step) -> bytes
-        for depth, i, px, py in todo:
+        for n, (depth, i, px, py) in enumerate(todo):
+            if cancel is not None and n % CANCEL_EVERY == 0 and cancel():
+                return None
             step = min(16, int(depth / 3 / fog / 0.7 * 16))   # the fog in 16 steps, up to 70 %
             key = (colors[i], step)
             col = shades.get(key)
@@ -410,6 +472,11 @@ class LevelView:
 
     def floor_at(self, x, z, below):
         """Height of the highest surface at (x, z) that is not above `below`, None when there is none."""
+        if native.lib is not None:
+            if not self.faces:
+                return None
+            vx, vy, vz, faces = self._packed3d()[:4]
+            return native.floor_at(vx, vy, vz, faces, x, z, below)
         vx, vy, vz = self.vx, self.vy, self.vz
         best = None
         for a, b, c in (f[:3] for f in self.faces):
@@ -845,7 +912,7 @@ def template_meshes(game, lock=None):
 def mesh_thumbnail(meshes, w, h, yaw=35.0, pitch=25.0):
     """A small shaded picture of template meshes (RGB bytes), None when there is nothing to draw."""
     v = LevelView.__new__(LevelView)
-    v.vx, v.vy, v.vz, v.faces, v.tris, v._preview = [], [], [], [], [], None
+    v.vx, v.vy, v.vz, v.faces, v.tris, v._preview, v._packed = [], [], [], [], [], None, {}
     for verts, tris in meshes:
         v._add_faces(verts, tris)
     if not v.faces:
@@ -886,6 +953,11 @@ def _inside(c, ancestor):
             return True
         c = c.parent
     return False
+
+
+def ppm(rgb, w, h):
+    """RGB pixels -> binary PPM: tk.PhotoImage(data=...) reads it several times faster than a PNG."""
+    return b'P6 %d %d 255\n' % (w, h) + bytes(rgb)
 
 
 def png_base64(rgb, w, h):

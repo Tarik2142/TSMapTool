@@ -7,7 +7,9 @@ Maps can come from Xbox 360 DLC packages (the Xbox Live content files with long 
 `2F61D2EC…`) or from `.tsmap` files created by the tool itself. This is how the two Xbox-only map
 packs, *Futures-Past* and *Urban ReDuel*, can be played on PC.
 
-Requires Python 3 (tested with 3.14). No third-party packages are needed.
+Requires Python 3 (tested with 3.14). No third-party packages are needed. The Map window draws with
+`tsmap\native\raster.dll` (in the repository, for a 64-bit Python on Windows); without it the same Python code
+draws the map with the same result, a frame taking a second or two instead of hundredths.
 
 ## Running
 
@@ -133,10 +135,14 @@ The **Map** button shows the map selected on the **Scripts** tab from above.
   Shift+drag or the middle button moves the camera, the wheel zooms, a double click centres the view on
   the point under the cursor. WASD / arrows move the camera forward, back and sideways relative to where it looks, Q / E down
   and up, Shift three times faster. The keys work with any keyboard layout. The height cut, layers, object selection and coordinates work the same way. Markers hidden
-  behind walls are drawn as outlines. The renderer is pure Python: while the camera moves a simplified
-  model is shown (the 12 000 largest triangles, about 8 frames per second), and the full frame appears half
-  a second to a second after it stops. Triangles are drawn from far to near, so here and there a far surface
-  can cover a nearer one.
+  behind walls are drawn as outlines. The renderer is a software one (`tsmap\native\raster.c`): a frame
+  takes hundredths of a second, so the full model is shown while the camera moves too (about 15 frames per
+  second). Without `raster.dll` the renderer runs in Python: while the camera moves a simplified model is
+  shown (the 12 000 largest triangles), and the full frame appears a second or two after it stops.
+  Triangles are drawn from far to near, so here and there a far surface can cover a nearer one.
+- **Building `raster.dll`.** Only needed after changing `raster.c`: `tsmap\native\build.bat` (needs the
+  Visual Studio Build Tools with the C++ compiler). The C renderer follows the Python code step by step, so
+  both give the same pixels; change them together.
 - **Zones in 3D.** In the level file a zone is a flat outline at floor height; its height is set in the
   property text: `DOMAIN { height = N }`. In 3D such zones are drawn as prisms N metres high, zones without
   that block (fog, grass, some sound zones) as a dotted outline: the game uses its own default for them.
@@ -242,6 +248,7 @@ TSMapTool\
   tsmap\lg.py          .lg levels: object property texts and scripts
   tsmap\spawn.py       bots and vehicles: object conversion, resources for the preload list
   tsmap\mapview.py     top and 3D view of a level: geometry, object positions
+  tsmap\native\        map renderer in C (raster.c, raster.dll, build.bat) and its ctypes binding
   tsmap\catalog.py     catalog of objects from all multiplayer maps
   tsmap\i18n.py        interface localization (English strings + Ukrainian table)
   docs\scripts.md      level scripting reference (Ukrainian)

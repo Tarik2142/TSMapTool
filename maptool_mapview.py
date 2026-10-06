@@ -1,15 +1,16 @@
 """Map window: top view or 3D view of the level loaded on the Scripts tab; its objects are linked to the object list."""
 import math
+import queue
 import re
 import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from tsmap import _
+from tsmap import _, native
 from tsmap.lg import LevelFile
 from tsmap.mapview import (MODES, SPAWN_FLAGS, Camera, LevelView, instance_kind, instance_records, matrix_yaw,
-                           mesh_thumbnail, move_matrix, png_base64, template_meshes, unique_name)
+                           mesh_thumbnail, move_matrix, png_base64, ppm, template_meshes, unique_name)
 
 COLORS = {'start': '#4aa8ff', 'pickup': '#60d060', 'vehicle': '#ff9a2e', 'object': '#e8c84a', 'node': '#d080ff',
           'sound': '#9a9a9a', 'effect': '#b8a878', 'light': '#fff3a8', 'flag': '#ff60c0'}
@@ -18,7 +19,7 @@ ZONE_COLORS = {'dom_ai': '#ff5a5a', 'dom_spawn': '#ff9a2e', 'dom_time': '#c080ff
 LAYER_OF = {'zone': 'zones', 'start': 'players', 'flag': 'players', 'pickup': 'players', 'vehicle': 'players',
             'object': 'objects',
             'node': 'objects', 'sound': 'effects', 'effect': 'effects', 'light': 'lights'}
-PREVIEW_SCALE = 3          # the 3D preview is drawn at 1/3 of the window size and zoomed
+PREVIEW_SCALE = 3          # the 3D preview (Python drawing) is drawn at 1/3 of the window size and zoomed
 PREVIEW_W, PREVIEW_H = 240, 180    # catalog picture
 # movement keys (Windows virtual key codes): W A S D, arrows, Q E, Shift
 MOVE_KEYS = {87: 'fwd', 38: 'fwd', 83: 'back', 40: 'back', 65: 'left', 37: 'left', 68: 'right', 39: 'right',
@@ -47,6 +48,9 @@ class MapWindow(tk.Toplevel):
         self.gen = 0
         self._job = None
         self._preview_job = None
+        self._busy = False         # a frame is being drawn in a thread ...
+        self._again = False        # ... and the view changed meanwhile: draw the newest state after it
+        self._frames = queue.Queue()      # finished frames from the drawing thread
         self._drag = None
         self._pivot = None         # 3D: world point the camera turns around while dragging
         self._keys = set()         # movement keys held down
@@ -196,6 +200,7 @@ class MapWindow(tk.Toplevel):
 
         def work():
             view = LevelView(level, templates)
+            view.prepare()
             self.app.msgs.put(('call', lambda: self._view_ready(cls, view, keep)))
         threading.Thread(target=work, daemon=True).start()
 
@@ -244,11 +249,26 @@ class MapWindow(tk.Toplevel):
 
     def _screen(self, x, y, z):
         """Canvas position of a world point (None behind the 3D camera)."""
-        if self.mode3d.get():
-            w, h = self._size()
-            p = self.cam.project(w, h, (x, y, z))
-            return p and p[:2]
-        return self.to_canvas(x, z)
+        return self._projector()(x, y, z)
+
+    def _projector(self, cam=None):
+        """_screen for many points: the window size and the camera are read once (Camera.project and to_canvas
+        give the same positions). `cam`: another 3D camera (the one a frame was drawn with)."""
+        w, h = self._size()
+        if not self.mode3d.get():
+            cx, cz, s = self.cx, self.cz, self.s
+            return lambda x, y, z: (w / 2 + (x - cx) * s, h / 2 - (z - cz) * s)
+        cam = cam or self.cam
+        (ex, ey, ez), (rx, _ry, rz), (ux, uy, uz), (fx, fy, fz) = cam.basis()
+        foc = cam.focal(w)
+
+        def project(x, y, z):
+            dx, dy, dz = x - ex, y - ey, z - ez
+            d = dx * fx + dy * fy + dz * fz
+            if d <= 0.1:
+                return None
+            return w / 2 + (dx * rx + dz * rz) * foc / d, h / 2 - (dx * ux + dy * uy + dz * uz) * foc / d
+        return project
 
     def _fit(self):
         if not self.view:
@@ -311,6 +331,9 @@ class MapWindow(tk.Toplevel):
         """The camera moved: a quick preview now (when asked), the full image a moment later."""
         self.gen += 1                             # images being rendered for the old camera are dropped
         self.picks = None
+        if native.lib is not None:                # the C drawing: full frames while the camera moves; the
+            self._schedule(0)                     # markers are drawn with them (_rendered3d), in step
+            return
         if preview and not self._preview_job:
             self._preview_job = self.after(10, self._preview)
         elif not preview:
@@ -324,7 +347,7 @@ class MapWindow(tk.Toplevel):
         w, h = self._size()
         pw, ph = max(1, w // PREVIEW_SCALE), max(1, h // PREVIEW_SCALE)
         rgb, _ids = self.view.render3d(self.cam, pw, ph, self._cut(), preview=True)
-        self.photo = tk.PhotoImage(data=png_base64(rgb, pw, ph)).zoom(PREVIEW_SCALE)
+        self.photo = tk.PhotoImage(data=ppm(rgb, pw, ph)).zoom(PREVIEW_SCALE)
         self.canvas.delete('img')
         self.canvas.create_image(0, 0, anchor='nw', image=self.photo, tags='img')
         self.canvas.tag_lower('img')
@@ -349,7 +372,7 @@ class MapWindow(tk.Toplevel):
 
     def _on_cut(self):
         self._show_cut()
-        if self.mode3d.get() and self.view:
+        if self.mode3d.get() and self.view and native.lib is None:
             self.gen += 1
             self.picks = None
             if not self._preview_job:
@@ -358,6 +381,9 @@ class MapWindow(tk.Toplevel):
 
     # ------------------------------------------------------------------ image
     def _schedule(self, delay=150):
+        """Draw the image after `delay` ms; the C drawing draws at once (a frame takes a few hundredths)."""
+        if native.lib is not None:
+            delay = 1
         if self._job:
             self.after_cancel(self._job)
         self._job = self.after(delay, self._render)
@@ -366,17 +392,25 @@ class MapWindow(tk.Toplevel):
         self._job = None
         if not self.view:
             return
+        self.gen += 1                             # a frame drawn in Python for an older state stops
+        if self._busy:                            # one frame at a time: the newest state follows it
+            self._again = True
+            return
         w, h = self._size()
-        self.gen += 1
         gen, view, cut = self.gen, self.view, self._cut()
+
+        def cancel():
+            return gen != self.gen
+        self._busy = True
+        self.after(5, self._poll_frames)
         if self.mode3d.get():
             state = self._cam_state()
             cam = Camera(*state, fov=self.cam.fov)       # a copy: the window may move the camera meanwhile
 
             def work3d():
-                rgb, ids = view.render3d(cam, w, h, cut)
-                data = png_base64(rgb, w, h)
-                self.app.msgs.put(('call', lambda: self._rendered3d(gen, state, w, h, data, ids)))
+                r = view.render3d(cam, w, h, cut, cancel=cancel)
+                data = r and ppm(r[0], w, h)
+                self._frames.put(lambda: self._rendered3d(gen, view, state, w, h, data, r and r[1]))
             threading.Thread(target=work3d, daemon=True).start()
             return
         x0, z1 = self.to_world(0, 0)
@@ -384,13 +418,33 @@ class MapWindow(tk.Toplevel):
         s = self.s
 
         def work():
-            rgb, hgt = view.render((x0, z0, x1, z1), w, h, cut)
-            data = png_base64(rgb, w, h)
-            self.app.msgs.put(('call', lambda: self._rendered(gen, x0, z1, s, w, h, data, hgt)))
+            r = view.render((x0, z0, x1, z1), w, h, cut, cancel=cancel)
+            data = r and ppm(r[0], w, h)
+            self._frames.put(lambda: self._rendered(gen, view, x0, z1, s, w, h, data, r and r[1]))
         threading.Thread(target=work, daemon=True).start()
 
-    def _rendered(self, gen, x0, z1, s, w, h, data, hgt):
-        if gen != self.gen or not self.winfo_exists() or self.mode3d.get():
+    def _poll_frames(self):
+        """Take the finished frame (the application's message queue is read only ten times a second)."""
+        try:
+            done = self._frames.get_nowait()
+        except queue.Empty:
+            if self.winfo_exists():
+                self.after(5, self._poll_frames)
+            return
+        self._busy = False
+        if self._again:
+            self._again = False
+            self._render()
+        if self.winfo_exists():
+            done()
+
+    def _fresh(self, gen, view):
+        """A finished frame is shown: one for the current state, or with the C drawing also an older one while
+        the next is drawn (it is placed where it was drawn, the 3D picks check the camera)."""
+        return view is self.view and (gen == self.gen or native.lib is not None)
+
+    def _rendered(self, gen, view, x0, z1, s, w, h, data, hgt):
+        if not data or not self._fresh(gen, view) or self.mode3d.get():
             return
         self.photo = tk.PhotoImage(data=data)
         self.canvas.delete('img')
@@ -399,15 +453,15 @@ class MapWindow(tk.Toplevel):
         self.canvas.tag_lower('img')
         self.heights = (x0, z1, s, w, h, hgt)
 
-    def _rendered3d(self, gen, state, w, h, data, ids):
-        if gen != self.gen or not self.winfo_exists() or not self.mode3d.get():
+    def _rendered3d(self, gen, view, state, w, h, data, ids):
+        if not data or not self._fresh(gen, view) or not self.mode3d.get():
             return
         self.photo = tk.PhotoImage(data=data)
         self.canvas.delete('img')
         self.canvas.create_image(0, 0, anchor='nw', image=self.photo, tags='img')
         self.canvas.tag_lower('img')
         self.picks = (state, w, h, ids)
-        self._draw()                              # the markers hidden behind walls are known now
+        self._draw(Camera(*state, fov=self.cam.fov))      # in step with the image; the hidden markers are known
 
     def height_at(self, x, z):
         if not self.heights:
@@ -419,28 +473,38 @@ class MapWindow(tk.Toplevel):
         return None
 
     # ------------------------------------------------------------------ objects
-    def _hidden(self, o, px, py):
-        """3D: the marker is behind the level geometry (known only for a full image)."""
+    def _hidden_test(self, cam):
+        """3D: hidden(o, px, py) tells whether the marker at (px, py) is behind the level geometry; None when
+        that is not known (no full image of camera `cam`)."""
         if not self.mode3d.get() or self.picks is None:
-            return False
-        p = self.pick(px, py)
-        if p is None:
-            return False
-        e = self.cam.basis()[0]
-        return math.dist(e, p) < math.dist(e, o.pos) - 0.5
+            return None
+        state, w, h, ids = self.picks
+        if state != (cam.target, cam.yaw, cam.pitch, cam.dist) or (w, h) != self._size():
+            return None
+        e, view = cam.basis()[0], self.view
 
-    def _draw(self):
+        def hidden(o, px, py):
+            p = view.pick(cam, w, h, ids, int(px), int(py))
+            return p is not None and math.dist(e, p) < math.dist(e, o.pos) - 0.5
+        return hidden
+
+    def _draw(self, cam=None):
+        """Markers and outlines of the objects; `cam`: the 3D camera of the image shown (default: the current)."""
         c = self.canvas
         c.delete('ov')
         if not self.view or (self.mode3d.get() and self.cam is None):
             return
+        cam = cam or self.cam
         w, h = self._size()
-        names = self.layers['names'].get()
+        scr = self._projector(cam)
+        hidden = self._hidden_test(cam)
+        layer_on = {k: v.get() for k, v in self.layers.items()}
+        names = layer_on['names']
         editing = self.edit_var.get()
         for i, o in enumerate(self.view.objects):
-            if not self.layers[LAYER_OF[o.kind]].get() and o is not self.selected or o.deleted and not editing:
+            if not layer_on[LAYER_OF[o.kind]] and o is not self.selected or o.deleted and not editing:
                 continue
-            p = self._screen(*o.pos)
+            p = scr(*o.pos)
             if p is None:
                 continue
             px, py = p
@@ -450,7 +514,7 @@ class MapWindow(tk.Toplevel):
                 c.create_line(px - 6, py + 6, px + 6, py - 6, fill='#ff5050', width=2, tags=tags)
                 continue
             if o.outline and len(o.outline) > 1:
-                shape = self._outline(o)
+                shape = self._outline(o, scr)
                 if shape is None:
                     continue
                 bottom, top = shape
@@ -470,7 +534,7 @@ class MapWindow(tk.Toplevel):
                 continue
             col = zone_color(o) if o.kind == 'zone' else COLORS[o.kind]
             r = {'light': 2, 'sound': 3, 'effect': 2, 'object': 3, 'node': 3}.get(o.kind, 5)
-            fill, edge = (col, '#10141a') if not self._hidden(o, px, py) else ('', col)   # behind a wall: outline
+            fill, edge = (col, '#10141a') if not (hidden and hidden(o, px, py)) else ('', col)  # behind a wall
             if o.kind == 'start':
                 c.create_polygon(px, py - r - 1, px - r, py + r, px + r, py + r, fill=fill, outline=edge, tags=tags)
             elif o.kind == 'vehicle':
@@ -484,10 +548,10 @@ class MapWindow(tk.Toplevel):
             if names and o.kind != 'light':
                 c.create_text(px + r + 3, py, text=o.name, anchor='w', fill=col, font=('Segoe UI', 8), tags=tags)
         o = self.selected
-        p = o is not None and self._screen(*o.pos)
+        p = o is not None and scr(*o.pos)
         if p:
             px, py = p
-            shape = o.outline and len(o.outline) > 1 and self._outline(o)
+            shape = o.outline and len(o.outline) > 1 and self._outline(o, scr)
             if shape:
                 self._draw_shape(shape[0], shape[1], '#ffffff', 3, (), 'ov')
             c.create_oval(px - 10, py - 10, px + 10, py + 10, outline='#ffffff', width=2, tags='ov')
@@ -496,7 +560,7 @@ class MapWindow(tk.Toplevel):
         if self.edit_var.get():
             for o in self.view.objects:                   # where the moved objects were: a dashed line
                 if o.mpos in self.moves and o.mpos in self._loaded and not o.deleted:
-                    a, b = self._screen(*self._loaded[o.mpos][0]), self._screen(*o.pos)
+                    a, b = scr(*self._loaded[o.mpos][0]), scr(*o.pos)
                     if a and b:
                         c.create_line(a[0], a[1], b[0], b[1], fill='#ff9a2e', dash=(3, 3), tags='ov')
                         c.create_oval(a[0] - 3, a[1] - 3, a[0] + 3, a[1] + 3, outline='#ff9a2e', tags='ov')
@@ -504,23 +568,24 @@ class MapWindow(tk.Toplevel):
             if o is not None:                             # heading: the object's local Z axis
                 n = math.hypot(o.matrix[8], o.matrix[10]) or 1.0
                 tip = (o.pos[0] + 1.5 * o.matrix[8] / n, o.pos[1], o.pos[2] + 1.5 * o.matrix[10] / n)
-                a, b = self._screen(*o.pos), self._screen(*tip)
+                a, b = scr(*o.pos), scr(*tip)
                 if a and b:
                     c.create_line(a[0], a[1], b[0], b[1], fill='#ffffff', width=2, arrow='last', tags='ov')
-        p = self._pivot is not None and self.mode3d.get() and self._screen(*self._pivot)
+        p = self._pivot is not None and self.mode3d.get() and scr(*self._pivot)
         if p:                                         # the point the camera turns around while dragging
             px, py = p
             c.create_line(px - 7, py, px + 7, py, fill='#ffffff', width=2, tags='ov')
             c.create_line(px, py - 7, px, py + 7, fill='#ffffff', width=2, tags='ov')
 
-    def _outline(self, o):
+    def _outline(self, o, scr=None):
         """Canvas points of an object's outline: (bottom, top). In 3D a zone with a height is a prism and `top`
-        is its upper outline, otherwise None. None when a point is behind the camera."""
+        is its upper outline, otherwise None. None when a point is behind the camera. `scr`: _projector()."""
+        scr = scr or self._projector()
         y = o.pos[1]
-        bottom = [self._screen(x, y, z) for x, z in o.outline]
+        bottom = [scr(x, y, z) for x, z in o.outline]
         top = None
         if self.mode3d.get() and o.kind == 'zone' and o.height:
-            top = [self._screen(x, y + o.height, z) for x, z in o.outline]
+            top = [scr(x, y + o.height, z) for x, z in o.outline]
             if None in top:
                 return None
         return None if None in bottom else (bottom, top)
@@ -884,8 +949,8 @@ class MapWindow(tk.Toplevel):
                 with self.app.lock:
                     data = game.level_data(cls, original=True)
                 mats = {}
-                for _c, name, _t, _k, m, _p in instance_records(LevelFile(data)):
-                    mats.setdefault(name, m)
+                for rec in instance_records(LevelFile(data)):
+                    mats.setdefault(rec.name, rec.matrix)
             except Exception as e:                          # noqa: BLE001 - reported in the status line
                 msg = str(e)
                 self.app.msgs.put(('call', lambda: self.status.set(msg)))
