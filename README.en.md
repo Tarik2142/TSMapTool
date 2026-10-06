@@ -9,7 +9,8 @@ packs, *Futures-Past* and *Urban ReDuel*, can be played on PC.
 
 Requires Python 3 (tested with 3.14). No third-party packages are needed. The Map window draws with
 `tsmap\native\raster.dll` (in the repository, for a 64-bit Python on Windows); without it the same Python code
-draws the map with the same result, a frame taking a second or two instead of hundredths.
+draws the map, a frame taking a second or two instead of hundredths and the 3D view drawn more simply (see
+**3D**).
 
 ## Running
 
@@ -139,10 +140,11 @@ The **Map** button shows the map selected on the **Scripts** tab from above.
   takes hundredths of a second, so the full model is shown while the camera moves too (about 15 frames per
   second). Without `raster.dll` the renderer runs in Python: while the camera moves a simplified model is
   shown (the 12 000 largest triangles), and the full frame appears a second or two after it stops.
-  Triangles are drawn from far to near, so here and there a far surface can cover a nearer one.
+  The C renderer keeps a depth buffer, so every pixel shows the nearest surface. Python only draws the
+  triangles from far to near, so there a big plane (the ground or water under a map) can cover nearer objects.
 - **Building `raster.dll`.** Only needed after changing `raster.c`: `tsmap\native\build.bat` (needs the
   Visual Studio Build Tools with the C++ compiler). The C renderer follows the Python code step by step, so
-  both give the same pixels; change them together.
+  both give the same pixels (in 3D C adds a depth buffer); change them together.
 - **Zones in 3D.** In the level file a zone is a flat outline at floor height; its height is set in the
   property text: `DOMAIN { height = N }`. In 3D such zones are drawn as prisms N metres high, zones without
   that block (fog, grass, some sound zones) as a dotted outline: the game uses its own default for them.

@@ -1,8 +1,8 @@
 """The rasteriser of the map window in C (raster.c, built into raster.dll by build.bat), called through ctypes.
 
 `lib` is None when the DLL is missing or does not load (another platform, a 32-bit Python): the map then draws
-with the Python code of tsmap/mapview.py, the same pixels, only slower. ctypes releases the GIL during a call, so
-a frame drawn in a thread does not hold up the window.
+with the Python code of tsmap/mapview.py, the same pixels (except the depth buffer of the 3D view), only slower.
+ctypes releases the GIL during a call, so a frame drawn in a thread does not hold up the window.
 """
 import array
 import ctypes

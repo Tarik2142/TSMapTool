@@ -1,7 +1,9 @@
 /* Rasteriser of the map window (tsmap/mapview.py): the same drawing as the Python code there, about a hundred
  * times faster. Built into raster.dll by build.bat; without the DLL the Python code is used.
  *
- * The arithmetic follows the Python code step by step in double precision, so both give the same pixels.
+ * The arithmetic follows the Python code step by step in double precision, so both give the same pixels, with
+ * one difference: the 3D view here keeps a depth buffer (1 / depth per pixel), the Python one only draws from far
+ * to near, where a big triangle (the ground under a map) can cover nearer small ones.
  */
 #include <math.h>
 #include <stdlib.h>
@@ -9,9 +11,39 @@
 
 #define EXPORT __declspec(dllexport)
 
-/* one screen triangle: rgb gets the colour, buf (4-byte values: float heights or int face indices) val */
+/* depth test of a 3D triangle: 1 / depth over the screen is the plane a * x + b * y + c, clamped to the range of
+ * its vertices (the filled span may reach a little outside the triangle) */
+typedef struct { float *buf; double a, b, c, lo, hi; } depth_t;
+
+static void depth_plane(depth_t *d, const double *px, const double *py, const double *iz)
+{
+    double den = (px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0]);
+    d->lo = fmin(fmin(iz[0], iz[1]), iz[2]);
+    d->hi = fmax(fmax(iz[0], iz[1]), iz[2]);
+    if (fabs(den) < 1e-9) {                   /* seen edge-on: its nearest point */
+        d->a = d->b = 0.0;
+        d->c = d->hi;
+        return;
+    }
+    d->a = ((iz[1] - iz[0]) * (py[2] - py[0]) - (iz[2] - iz[0]) * (py[1] - py[0])) / den;
+    d->b = ((px[1] - px[0]) * (iz[2] - iz[0]) - (px[2] - px[0]) * (iz[1] - iz[0])) / den;
+    d->c = iz[0] - d->a * px[0] - d->b * py[0];
+}
+
+static int depth_pass(const depth_t *d, size_t j, double x, double y)
+{
+    double z = d->a * x + d->b * y + d->c;
+    if (z < d->lo) z = d->lo;
+    else if (z > d->hi) z = d->hi;
+    if ((float)z < d->buf[j]) return 0;      /* something nearer is there (equal: the later, nearer face) */
+    d->buf[j] = (float)z;
+    return 1;
+}
+
+/* one screen triangle: rgb gets the colour, buf (4-byte values: float heights or int face indices) val;
+ * with `depth` only the pixels where the triangle is the nearest */
 static void fill(unsigned char *rgb, unsigned int *buf, unsigned int val, int w, int h, const double *px,
-                 const double *py, const unsigned char *col)
+                 const double *py, const unsigned char *col, const depth_t *depth)
 {
     double x0 = px[0], y0 = py[0], x1 = px[1], y1 = py[1], x2 = px[2], y2 = py[2], t;
     double r0d, r1d, dl = 0.0, da = 0.0, db = 0.0, xs0 = 0.0, xs2 = 0.0;
@@ -64,9 +96,9 @@ static void fill(unsigned char *rgb, unsigned int *buf, unsigned int val, int w,
         n = c1 - c0 + 1;
         p = rgb + 3 * ((size_t)row * w + c0);
         b = buf + (size_t)row * w + c0;
-        for (k = 0; k < n; k++) {
+        for (k = 0; k < n; k++, p += 3) {
+            if (depth && !depth_pass(depth, (size_t)row * w + c0 + k, c0 + k + 0.5, row + 0.5)) continue;
             p[0] = col[0]; p[1] = col[1]; p[2] = col[2];
-            p += 3;
             b[k] = val;
         }
     }
@@ -101,7 +133,7 @@ EXPORT void render2d(const double *tris, const unsigned char *colors, int n, dou
             continue;
         }
         v.f = (float)t[7];
-        fill(rgb, (unsigned int *)hgt, v.u, w, h, px, py, col);
+        fill(rgb, (unsigned int *)hgt, v.u, w, h, px, py, col, NULL);
     }
 }
 
@@ -128,10 +160,11 @@ EXPORT int render3d(const double *vx, const double *vy, const double *vz, int nv
     double *Z = malloc(sizeof(double) * (nv ? nv : 1));
     unsigned char *ok = malloc(nv ? nv : 1);
     item_t *todo = malloc(sizeof(item_t) * (nf ? nf : 1));
+    float *zbuf = calloc((size_t)w * h, sizeof(float));     /* 1 / depth, 0: nothing drawn */
     int i, n = 0;
 
-    if (!SX || !SY || !Z || !ok || !todo) {
-        free(SX); free(SY); free(Z); free(ok); free(todo);
+    if (!SX || !SY || !Z || !ok || !todo || !zbuf) {
+        free(SX); free(SY); free(Z); free(ok); free(todo); free(zbuf);
         return -1;
     }
     for (i = 0; i < nv; i++) {
@@ -163,8 +196,9 @@ EXPORT int render3d(const double *vx, const double *vy, const double *vz, int nv
     qsort(todo, n, sizeof(item_t), by_depth);
     for (i = 0; i < n; i++) {
         int f = todo[i].i, a = faces[3 * f], b = faces[3 * f + 1], c = faces[3 * f + 2], step, k;
-        double px[3], py[3], kf, lo, hi, top, bottom;
+        double px[3], py[3], iz[3], kf, lo, hi, top, bottom;
         unsigned char col[3];
+        depth_t depth;
 
         step = (int)(todo[i].depth / 3 / fog / 0.7 * 16);    /* the fog in 16 steps, up to 70 % */
         if (step > 16) step = 16;
@@ -175,6 +209,9 @@ EXPORT int render3d(const double *vx, const double *vy, const double *vz, int nv
         }
         px[0] = SX[a]; px[1] = SX[b]; px[2] = SX[c];
         py[0] = SY[a]; py[1] = SY[b]; py[2] = SY[c];
+        iz[0] = 1.0 / Z[a]; iz[1] = 1.0 / Z[b]; iz[2] = 1.0 / Z[c];
+        depth.buf = zbuf;
+        depth_plane(&depth, px, py, iz);
         lo = fmin(fmin(px[0], px[1]), px[2]);
         hi = fmax(fmax(px[0], px[1]), px[2]);
         top = fmin(fmin(py[0], py[1]), py[2]);
@@ -182,14 +219,16 @@ EXPORT int render3d(const double *vx, const double *vy, const double *vz, int nv
         if (hi - lo < 1 && bottom - top < 1) {    /* smaller than a pixel: one pixel */
             if (0 <= lo && 0 <= top) {
                 size_t j = (size_t)(int)top * w + (int)lo;
-                memcpy(rgb + 3 * j, col, 3);
-                ids[j] = f;
+                if (depth_pass(&depth, j, (lo + hi) / 2, (top + bottom) / 2)) {
+                    memcpy(rgb + 3 * j, col, 3);
+                    ids[j] = f;
+                }
             }
             continue;
         }
-        fill(rgb, (unsigned int *)ids, (unsigned int)f, w, h, px, py, col);
+        fill(rgb, (unsigned int *)ids, (unsigned int)f, w, h, px, py, col, &depth);
     }
-    free(SX); free(SY); free(Z); free(ok); free(todo);
+    free(SX); free(SY); free(Z); free(ok); free(todo); free(zbuf);
     return 0;
 }
 

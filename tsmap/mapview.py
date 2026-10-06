@@ -403,8 +403,9 @@ class LevelView:
 
     def render3d(self, cam, w, h, cut=None, preview=False, cancel=None):
         """Perspective view from Camera `cam` at w x h pixels: back faces culled, the rest drawn from far to near
-        (painter's algorithm). `preview` draws only the largest faces (while the camera moves) when the drawing
-        is done in Python; the C drawing is fast enough to draw them all.
+        (painter's algorithm); the C drawing also keeps a depth buffer, so a big triangle (the ground under the
+        map) does not cover nearer ones. `preview` draws only the largest faces (while the camera moves) when the
+        drawing is done in Python; the C drawing is fast enough to draw them all.
         Returns (rgb bytearray, face index per pixel array, -1 = empty; the index is valid without preview), None
         when `cancel()` turned true meanwhile (asked by the slow Python drawing only)."""
         (ex, ey, ez), (rx, ry, rz), (ux, uy, uz), (fx, fy, fz) = cam.basis()
