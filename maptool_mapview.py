@@ -367,19 +367,22 @@ class MapWindow(tk.Toplevel):
             px, py = p
             tags = ('ov', 'o%d' % i)
             if o.outline and len(o.outline) > 1:
-                pts = [self._screen(x, o.pos[1], z) for x, z in o.outline]
-                if None in pts:
+                shape = self._outline(o)
+                if shape is None:
                     continue
-                pts = [v for q in pts for v in q]
-                if max(pts[0::2]) < 0 or min(pts[0::2]) > w or max(pts[1::2]) < 0 or min(pts[1::2]) > h:
+                bottom, top = shape
+                xs, ys = [q[0] for q in bottom + (top or [])], [q[1] for q in bottom + (top or [])]
+                if max(xs) < 0 or min(xs) > w or max(ys) < 0 or min(ys) > h:
                     continue
                 if o.kind == 'zone':
                     col = zone_color(o)
                     special = col != ZONE_COLORS['dom_snd']
-                    c.create_polygon(pts, outline=col, fill='', width=2 if special else 1,
-                                     dash=() if special else (4, 3), tags=tags)
+                    dash = () if special else (4, 3)
+                    if self.mode3d.get() and o.height is None:
+                        dash = (2, 4)                 # no DOMAIN height: only the flat outline is known
+                    self._draw_shape(bottom, top, col, 2 if special else 1, dash, tags)
                 else:
-                    c.create_polygon(pts, outline=COLORS[o.kind], fill='', width=1, tags=tags)
+                    self._draw_shape(bottom, None, COLORS[o.kind], 1, (), tags)
             elif not (-20 < px < w + 20 and -20 < py < h + 20):
                 continue
             col = zone_color(o) if o.kind == 'zone' else COLORS[o.kind]
@@ -398,13 +401,35 @@ class MapWindow(tk.Toplevel):
         p = o is not None and self._screen(*o.pos)
         if p:
             px, py = p
-            if o.outline and len(o.outline) > 1:
-                pts = [self._screen(x, o.pos[1], z) for x, z in o.outline]
-                if None not in pts:
-                    c.create_polygon([v for q in pts for v in q], outline='#ffffff', fill='', width=3, tags='ov')
+            shape = o.outline and len(o.outline) > 1 and self._outline(o)
+            if shape:
+                self._draw_shape(shape[0], shape[1], '#ffffff', 3, (), 'ov')
             c.create_oval(px - 10, py - 10, px + 10, py + 10, outline='#ffffff', width=2, tags='ov')
             c.create_text(px + 13, py - 12, text=o.name, anchor='w', fill='#ffffff', font=('Segoe UI', 9, 'bold'),
                           tags='ov')
+
+    def _outline(self, o):
+        """Canvas points of an object's outline: (bottom, top). In 3D a zone with a height is a prism and `top`
+        is its upper outline, otherwise None. None when a point is behind the camera."""
+        y = o.pos[1]
+        bottom = [self._screen(x, y, z) for x, z in o.outline]
+        top = None
+        if self.mode3d.get() and o.kind == 'zone' and o.height:
+            top = [self._screen(x, y + o.height, z) for x, z in o.outline]
+            if None in top:
+                return None
+        return None if None in bottom else (bottom, top)
+
+    def _draw_shape(self, bottom, top, col, width, dash, tags):
+        c = self.canvas
+        if len(bottom) > 2:
+            c.create_polygon([v for q in bottom for v in q], outline=col, fill='', width=width, dash=dash, tags=tags)
+        else:
+            c.create_line([v for q in bottom for v in q], fill=col, width=width, dash=dash, tags=tags)
+        if top:
+            c.create_polygon([v for q in top for v in q], outline=col, fill='', width=width, dash=dash, tags=tags)
+            for a, b in zip(bottom, top):                 # vertical edges
+                c.create_line(a[0], a[1], b[0], b[1], fill=col, width=width, dash=dash, tags=tags)
 
     def _object_at(self, px, py):
         """The object under the cursor: the nearest marker, else the smallest outline that contains the point."""
@@ -438,6 +463,8 @@ class MapWindow(tk.Toplevel):
                 'object': _('object'), 'node': _('scene object'), 'sound': _('sound'), 'effect': _('effect'),
                 'light': _('light')}[o.kind]
         text = '%s  [%s%s]  (%.1f, %.1f, %.1f)' % (o.name, kind, ', ' + o.template if o.template else '', *o.pos)
+        if o.kind == 'zone':
+            text += '  ' + (_('height %g m', o.height) if o.height is not None else _('height not set'))
         if o.texts:
             text += '  ' + _('click: show in the list')
         return text

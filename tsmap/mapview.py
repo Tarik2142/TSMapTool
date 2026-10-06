@@ -12,6 +12,7 @@ X to the right and Z up.
 import array
 import base64
 import math
+import re
 import struct
 import zlib
 
@@ -66,11 +67,12 @@ def _hull(points):
 
 class MapObject:
     """kind: zone, node, start, pickup, vehicle, sound, effect, object, light."""
-    __slots__ = ('kind', 'name', 'template', 'pos', 'outline', 'texts')
+    __slots__ = ('kind', 'name', 'template', 'pos', 'outline', 'texts', 'height')
 
     def __init__(self, kind, name, template, pos, outline=None):
         self.kind, self.name, self.template, self.pos, self.outline = kind, name, template, pos, outline
         self.texts = []            # indices of LevelFile.objects (property texts) that belong to this object
+        self.height = None         # zones: DOMAIN { height } above the flat outline, None when not set
 
 
 def _kids(c):
@@ -124,6 +126,8 @@ class LevelView:
                     pos, outline = self._node_matrix(c)[12:15], None
                 o = MapObject('zone' if flags.startswith('&dom_') else 'node', name, flags.lstrip('&'), pos, outline)
                 o.texts = texts
+                if o.kind == 'zone':
+                    o.height = zone_height(' '.join(lf.objects[i].text for i in texts))
                 self.objects.append(o)
 
         # instances
@@ -415,6 +419,13 @@ class Camera:
         n = math.hypot(f[0], f[2]) or 1.0
         fwd = (f[0] / n, 0.0, f[2] / n)
         self.target = tuple(t - r[k] * dx * m + fwd[k] * dy * m for k, t in enumerate(self.target))
+
+
+def zone_height(text):
+    """A zone is a flat outline (all its vertices have one Y); its height is DOMAIN { height = N } in the
+    property text. None when the text does not set it (the game then uses its own default)."""
+    m = re.search(r'(?s)\bDOMAIN\s*\{[^{}]*?\bheight\s*=\s*(-?\d+(?:\.\d+)?)', text)
+    return float(m.group(1)) if m else None
 
 
 def _fill(rgb, buf, val, w, h, px, py, col):

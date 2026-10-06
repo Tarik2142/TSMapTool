@@ -130,6 +130,10 @@ The **Map** button shows the map selected on the **Scripts** tab from above.
   model is shown (the 12 000 largest triangles, about 8 frames per second), and the full frame appears half
   a second to a second after it stops. Triangles are drawn from far to near, so here and there a far surface
   can cover a nearer one.
+- **Zones in 3D.** In the level file a zone is a flat outline at floor height; its height is set in the
+  property text: `DOMAIN { height = N }`. In 3D such zones are drawn as prisms N metres high, zones without
+  that block (fog, grass, some sound zones) as a dotted outline: the game uses its own default for them.
+  The zone height is shown in the hover text.
 
 X points right and Z up. Whether this matches the game or is mirrored has not been checked yet.
 

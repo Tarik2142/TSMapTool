@@ -257,6 +257,8 @@ UK = {
     'WASD / arrows: move, Shift: faster': 'WASD / стрілки: рух, Shift: швидше',
     '%s: %d triangles, %d objects': '%s: трикутників %d, об\'єктів %d',
     'click: show in the list': 'клік: показати в списку',
+    'height %g m': 'висота %g м',
+    'height not set': 'висота не задана',
     'This object has no position on the map': 'Цей об\'єкт не має позиції на карті',
     'Copied: %s': 'Скопійовано: %s',
 }
