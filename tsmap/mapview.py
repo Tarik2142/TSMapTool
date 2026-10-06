@@ -412,6 +412,37 @@ class Camera:
         a, b = (px - w / 2) / foc, -(py - h / 2) / foc
         return e, tuple(f[k] + r[k] * a + u[k] * b for k in range(3))
 
+    def orbit(self, dyaw, dpitch, pivot=None):
+        """Turn by dyaw / dpitch degrees around a world point (the target when None): the eye and the target
+        move around the pivot together, so the pivot stays where it is on the screen."""
+        pitch = min(89.0, max(-20.0, self.pitch + dpitch))
+        dpitch = pitch - self.pitch
+        if pivot is None:
+            pivot = self.target
+        e = self.basis()[0]
+        a, p = math.radians(dyaw), math.radians(dpitch)
+        ny = math.radians(self.yaw + dyaw)
+        r = (math.cos(ny), 0.0, -math.sin(ny))          # the right axis after the turn around Y
+
+        def turn(v):
+            x, y, z = (v[k] - pivot[k] for k in range(3))
+            x, z = x * math.cos(a) + z * math.sin(a), -x * math.sin(a) + z * math.cos(a)     # around Y: yaw
+            c, s = math.cos(p), math.sin(p)                                                  # around r: pitch
+            cross = (r[1] * z - r[2] * y, r[2] * x - r[0] * z, r[0] * y - r[1] * x)
+            dot = r[0] * x + r[1] * y + r[2] * z
+            return tuple(pivot[k] + (x, y, z)[k] * c + cross[k] * s + r[k] * dot * (1 - c) for k in range(3))
+        self.target, e = turn(self.target), turn(e)
+        self.yaw, self.pitch = (self.yaw + dyaw) % 360, pitch
+        self.dist = math.dist(self.target, e)
+
+    def ground(self, w, h, px, py, height):
+        """Where the ray through a screen point meets the horizontal plane Y = height, None if it does not."""
+        e, d = self.ray(w, h, px, py)
+        if abs(d[1]) < 1e-9:
+            return None
+        t = (height - e[1]) / d[1]
+        return tuple(e[k] + d[k] * t for k in range(3)) if t > 0 else None
+
     def pan(self, dx, dy, w):
         """Move the target by a screen offset in pixels, along the ground."""
         _, r, u, f = self.basis()

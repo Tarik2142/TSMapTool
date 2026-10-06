@@ -246,10 +246,10 @@ UK = {
     'zone': 'зона',
     'sound': 'звук',
     'light': 'світло',
-    'Drag: rotate, Shift+drag or middle button: move, wheel: zoom, double click: rotate around that point, '
-    'right click: copy coordinates':
-        'Перетягування: обертання, Shift+перетягування чи середня кнопка: зсув, колесо: масштаб, подвійний клік: '
-        'обертати навколо цієї точки, правий клік: копіювати координати',
+    'Drag: rotate around the point under the cursor, Shift+drag or middle button: move, '
+    'wheel: zoom, double click: centre on that point, right click: copy coordinates':
+        'Перетягування: обертання навколо точки під курсором, Shift+перетягування чи середня кнопка: зсув, '
+        'колесо: масштаб, подвійний клік: центрувати на цій точці, правий клік: копіювати координати',
     'WASD / arrows: move, Q / E: down / up, Shift: faster':
         'WASD / стрілки: рух, Q / E: вниз / вгору, Shift: швидше',
     'Wheel: zoom, drag: move, right click: copy coordinates':

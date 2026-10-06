@@ -43,6 +43,7 @@ class MapWindow(tk.Toplevel):
         self._job = None
         self._preview_job = None
         self._drag = None
+        self._pivot = None         # 3D: world point the camera turns around while dragging
         self._keys = set()         # movement keys held down
         self._move_job = None
         self._move_time = 0.0
@@ -107,8 +108,8 @@ class MapWindow(tk.Toplevel):
         self.bind('<FocusOut>', lambda e: self._keys.clear())
 
     def _show_hint(self):
-        self.hint.configure(text=_('Drag: rotate, Shift+drag or middle button: move, wheel: zoom, double click: '
-                                   'rotate around that point, right click: copy coordinates') + '\n'
+        self.hint.configure(text=_('Drag: rotate around the point under the cursor, Shift+drag or middle button: move, '
+                                   'wheel: zoom, double click: centre on that point, right click: copy coordinates') + '\n'
                             + _('WASD / arrows: move, Q / E: down / up, Shift: faster')
                             if self.mode3d.get() else
                             _('Wheel: zoom, drag: move, right click: copy coordinates') + '\n'
@@ -407,6 +408,11 @@ class MapWindow(tk.Toplevel):
             c.create_oval(px - 10, py - 10, px + 10, py + 10, outline='#ffffff', width=2, tags='ov')
             c.create_text(px + 13, py - 12, text=o.name, anchor='w', fill='#ffffff', font=('Segoe UI', 9, 'bold'),
                           tags='ov')
+        p = self._pivot is not None and self.mode3d.get() and self._screen(*self._pivot)
+        if p:                                         # the point the camera turns around while dragging
+            px, py = p
+            c.create_line(px - 7, py, px + 7, py, fill='#ffffff', width=2, tags='ov')
+            c.create_line(px, py - 7, px, py + 7, fill='#ffffff', width=2, tags='ov')
 
     def _outline(self, o):
         """Canvas points of an object's outline: (bottom, top). In 3D a zone with a height is a prism and `top`
@@ -512,6 +518,12 @@ class MapWindow(tk.Toplevel):
     def _on_press(self, e):
         self.canvas.focus_set()                   # for the movement keys
         self._drag = (e.x, e.y, e.x, e.y)
+        self._pivot = None
+        if self.view and self.mode3d.get():
+            # turn around the point under the cursor; where nothing is drawn (or the full image is not ready),
+            # around the point where the cursor ray meets the ground plane at the height of the target
+            w, h = self._size()
+            self._pivot = self.pick(e.x, e.y) or self.cam.ground(w, h, e.x + 0.5, e.y + 0.5, self.cam.target[1])
 
     # ------------------------------------------------------------------ keyboard
     def _key_down(self, e):
@@ -565,10 +577,10 @@ class MapWindow(tk.Toplevel):
         self._drag = (x0, y0, e.x, e.y)
         if self.mode3d.get():
             if pan or e.state & 0x1:              # middle button or Shift: move the point the camera looks at
+                self._pivot = None
                 self.cam.pan(dx, dy, self._size()[0])
             else:
-                self.cam.yaw = (self.cam.yaw - dx * 0.4) % 360
-                self.cam.pitch = min(89.0, max(-20.0, self.cam.pitch + dy * 0.3))
+                self.cam.orbit(-dx * 0.4, dy * 0.3, self._pivot)
             self._camera_changed()
             return
         self.canvas.move('all', dx, dy)
@@ -578,6 +590,9 @@ class MapWindow(tk.Toplevel):
 
     def _on_release(self, e, select=True):
         drag, self._drag = self._drag, None
+        if self._pivot is not None:
+            self._pivot = None
+            self._draw()
         if not drag or not self.view or (drag[2], drag[3]) != (drag[0], drag[1]) or not select:
             return
         o = self._object_at(e.x, e.y)

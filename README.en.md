@@ -122,9 +122,10 @@ The **Map** button shows the map selected on the **Scripts** tab from above.
   to the whole map. The bottom line
   shows X, Y, Z under the cursor (Y is the height of the surface). Right click copies them to the clipboard,
   ready to paste as a position on the **Bots and vehicles** tab.
-- **3D.** The **3D** switch shows the level in perspective. Dragging rotates the camera, Shift+drag or the
-  middle button moves it, the wheel zooms, a double click makes the point under the cursor the centre of
-  rotation. WASD / arrows move the camera forward, back and sideways relative to where it looks, Q / E down
+- **3D.** The **3D** switch shows the level in perspective. Dragging rotates the camera around the point
+  where the drag started (marked with a cross; over empty space, a point at the height of the view centre).
+  Shift+drag or the middle button moves the camera, the wheel zooms, a double click centres the view on
+  the point under the cursor. WASD / arrows move the camera forward, back and sideways relative to where it looks, Q / E down
   and up, Shift three times faster. The keys work with any keyboard layout. The height cut, layers, object selection and coordinates work the same way. Markers hidden
   behind walls are drawn as outlines. The renderer is pure Python: while the camera moves a simplified
   model is shown (the 12 000 largest triangles, about 8 frames per second), and the full frame appears half
