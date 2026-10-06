@@ -73,10 +73,21 @@ def _hull(points):
     return lo[:-1] + hi[:-1]
 
 
+ZoneGeom = collections.namedtuple('ZoneGeom', 'verts vert_off normals normal_off box_off centre axis size')
+ZoneGeom.__doc__ = """A zone as loaded, for moving it in place: its vertices (world space) and their offset in the level file
+(chunk 0xf1 after the count), the normals (0x110, None when missing), the bounding box (0x11d after its count:
+6 floats), the centre of the vertices, around which the zone turns, and its own axes: the direction of its width
+(radians from +X towards +Z, the side of the smallest rectangle around it that is nearest to X) and its (width,
+length) along them.
+
+The matrix of a zone holds in rows 0 and 2 the 2x2 map of its (x, z) as loaded (row vectors: p' = p * M, the
+part P that stretches it along its axes, then the turn R: M = P R) and in row 3 where its centre goes."""
+
+
 class MapObject:
     """kind: zone, node, start, flag, pickup, vehicle, sound, effect, object, light."""
     __slots__ = ('kind', 'name', 'template', 'pos', 'outline', 'texts', 'height', 'matrix', 'mpos', 'flags',
-                 'record', 'new', 'deleted', 'catalog')
+                 'record', 'new', 'deleted', 'catalog', 'geom')
 
     def __init__(self, kind, name, template, pos, outline=None):
         self.kind, self.name, self.template, self.pos, self.outline = kind, name, template, pos, outline
@@ -89,6 +100,8 @@ class MapObject:
         self.new = False           # added on the map, not saved yet
         self.deleted = False       # deleted on the map, not saved yet
         self.catalog = False       # new object from the catalog: its resources go to the preload list
+        self.geom = None           # zones: ZoneGeom; their matrix is a turn around the vertical axis at the centre
+                                   # (identity as loaded), mpos the offset of the vertex chunk (the key of a move)
 
     @property
     def movable(self):
@@ -152,6 +165,10 @@ class LevelView:
                 o.texts = texts
                 if o.kind == 'zone':
                     o.height = zone_height(' '.join(lf.objects[i].text for i in texts))
+                    o.geom = _zone_geom(d, k, verts, pos)
+                    if o.geom is not None:
+                        o.mpos = k[0xf1].start
+                        o.matrix = IDENT[:12] + (*pos, 1.0)
                 self.objects.append(o)
 
         # instances
@@ -751,13 +768,186 @@ def move_matrix(m, pos, turn=0.0):
 
 
 def apply_moves(data, moves):
-    """Level data with the instance matrices {offset: 16 floats} written in place (the size does not change)."""
+    """Level data with the instance matrices {offset: 16 floats} written in place (the size does not change);
+    a bytes value is written as it is (the vertices, normals and box of a zone, see zone_patches)."""
     out = bytearray(data)
     for pos, m in moves.items():
+        if isinstance(m, (bytes, bytearray)):
+            if pos + len(m) > len(out):
+                raise ValueError('patch past the end at %d' % pos)
+            out[pos:pos + len(m)] = m
+            continue
         if out[pos - 1] != 0:
             raise ValueError('not an instance matrix at %d' % pos)
         struct.pack_into('<16f', out, pos, *m)
     return bytes(out)
+
+
+def _zone_geom(d, k, verts, centre):
+    """ZoneGeom of a zone node (children by tag), None when it cannot be moved in place."""
+    if not verts or 0x11d not in k or k[0x11d].end - k[0x11d].start != 28:
+        return None
+    n = len(verts)
+    nc = k.get(0x110)
+    normals = None
+    if nc is not None and nc.end - nc.start == 4 + 12 * n:
+        normals = tuple(struct.iter_unpack('<3f', d[nc.start + 4:nc.end]))
+    axis, size = _zone_axes([(v[0], v[2]) for v in verts])
+    return ZoneGeom(tuple(verts), k[0xf1].start + 4, normals, nc.start + 4 if normals else None, k[0x11d].start + 4,
+                    tuple(centre), axis, size)
+
+
+def _zone_axes(points):
+    """(axis, (width, length)) of the smallest rectangle around 2D points: one of its sides is a side of the
+    convex hull; the axis is turned by a multiple of 90 degrees to be the side nearest to X."""
+    hull = _hull(points)
+    best = (0.0, (max(p[0] for p in points) - min(p[0] for p in points),
+                  max(p[1] for p in points) - min(p[1] for p in points)))
+    if len(hull) >= 3:
+        area = None
+        for (ax, az), (bx, bz) in zip(hull, hull[1:] + hull[:1]):
+            if (ax, az) == (bx, bz):
+                continue
+            a = math.atan2(bz - az, bx - ax)
+            u, v = (math.cos(a), math.sin(a)), (-math.sin(a), math.cos(a))
+            pu = [x * u[0] + z * u[1] for x, z in points]
+            pv = [x * v[0] + z * v[1] for x, z in points]
+            ext = (max(pu) - min(pu), max(pv) - min(pv))
+            if area is None or ext[0] * ext[1] < area - 1e-9:
+                area, best = ext[0] * ext[1], (a, ext)
+    a, (w, l) = best
+    while a > math.pi / 4 + 1e-9:            # the side nearest to X is the width
+        a, w, l = a - math.pi / 2, l, w
+    while a <= -math.pi / 4 + 1e-9:
+        a, w, l = a + math.pi / 2, l, w
+    return a, (w, l)
+
+
+def _lin(m):
+    """The 2x2 map of a zone's (x, z) in its matrix: ((m0, m2), (m8, m10))."""
+    return (m[0], m[2]), (m[8], m[10])
+
+
+def _polar(m):
+    """M = P R of a zone matrix: P symmetric (the stretch), R the turn; (P, R) as 2x2 tuples."""
+    (a, b), (c, e) = _lin(m)
+    # P = sqrt(M M^T); for a 2x2 positive definite S: sqrt(S) = (S + sqrt(det S) I) / sqrt(trace S + 2 sqrt(det S))
+    s11, s12, s22 = a * a + b * b, a * c + b * e, c * c + e * e
+    r = math.sqrt(max(s11 * s22 - s12 * s12, 0.0))
+    t = math.sqrt(max(s11 + s22 + 2 * r, 1e-18))
+    p11, p12, p22 = (s11 + r) / t, s12 / t, (s22 + r) / t
+    det = p11 * p22 - p12 * p12
+    if abs(det) < 1e-12:
+        return ((1.0, 0.0), (0.0, 1.0)), ((1.0, 0.0), (0.0, 1.0))
+    i11, i12, i22 = p22 / det, -p12 / det, p11 / det
+    rot = ((i11 * a + i12 * c, i11 * b + i12 * e), (i12 * a + i22 * c, i12 * b + i22 * e))
+    return ((p11, p12), (p12, p22)), rot
+
+
+def zone_shape(geom, m):
+    """(width, length, angle in degrees) of a zone with matrix m: its size along its own axes and its turn since
+    it was loaded (the angle field of the edit bar)."""
+    (p11, p12), (_p21, p22) = _polar(m)[0]
+    u = (math.cos(geom.axis), math.sin(geom.axis))
+    v = (-u[1], u[0])
+    su = u[0] * u[0] * p11 + 2 * u[0] * u[1] * p12 + u[1] * u[1] * p22
+    sv = v[0] * v[0] * p11 + 2 * v[0] * v[1] * p12 + v[1] * v[1] * p22
+    rot = _polar(m)[1]
+    return geom.size[0] * su, geom.size[1] * sv, math.degrees(math.atan2(rot[1][0], rot[1][1])) % 360
+
+
+def zone_matrix(geom, m, width, length):
+    """Matrix m with the zone stretched to width x length along its own axes (the turn and place are kept)."""
+    rot = _polar(m)[1]
+    sx = width / geom.size[0] if geom.size[0] > 1e-6 else 1.0
+    sz = length / geom.size[1] if geom.size[1] > 1e-6 else 1.0
+    u = (math.cos(geom.axis), math.sin(geom.axis))
+    v = (-u[1], u[0])
+    p11 = sx * u[0] * u[0] + sz * v[0] * v[0]
+    p12 = sx * u[0] * u[1] + sz * v[0] * v[1]
+    p22 = sx * u[1] * u[1] + sz * v[1] * v[1]
+    out = list(m)
+    out[0], out[2] = p11 * rot[0][0] + p12 * rot[1][0], p11 * rot[0][1] + p12 * rot[1][1]
+    out[8], out[10] = p12 * rot[0][0] + p22 * rot[1][0], p12 * rot[0][1] + p22 * rot[1][1]
+    return tuple(out)
+
+
+def zone_points(geom, m, points):
+    """World points of a zone as loaded, mapped by its matrix m (stretched and turned around its centre, moved)."""
+    (a, b), (c, e) = _lin(m)
+    cx, cy, cz = geom.centre
+    return [(m[12] + (x - cx) * a + (z - cz) * c, y + m[13] - cy, m[14] + (x - cx) * b + (z - cz) * e)
+            for x, y, z in points]
+
+
+def zone_patches(geom, m):
+    """{offset: bytes} that put a zone where matrix m says, written in place: the vertices (0xf1), the normals
+    (0x110, turned) and the bounding box (0x11d: 1 cm around the vertices, as in the game's levels). The zone stays
+    in the level's spatial grid (0x21f) where it was; the game finds a moved zone anyway (a moved bot spawner
+    triggered at its new place)."""
+    verts = [struct.unpack('<3f', struct.pack('<3f', *v)) for v in zone_points(geom, m, geom.verts)]
+    out = {geom.vert_off: b''.join(struct.pack('<3f', *v) for v in verts)}
+    if geom.normal_off is not None:
+        (a, b), (c, e) = _polar(m)[1]
+        out[geom.normal_off] = b''.join(struct.pack('<3f', x * a + z * c, y, x * b + z * e)
+                                        for x, y, z in geom.normals)
+    lo = [min(v[i] for v in verts) - 0.01 for i in range(3)]
+    hi = [max(v[i] for v in verts) + 0.01 for i in range(3)]
+    out[geom.box_off] = struct.pack('<6f', *lo, *hi)
+    return out
+
+
+def zone_vertices(lf):
+    """{name: [vertices]} of the zones of a level (the first one of a name)."""
+    d = lf.data
+    out = {}
+    for top in lf.top:
+        if top.tag != 0xf0:
+            continue
+        for c in _walk_nodes(top):
+            k = _kids(c)
+            flags = _cstr(d[k[0x115].start:k[0x115].end]) if 0x115 in k else ''
+            vc = k.get(0xf1)
+            if not flags.startswith('&dom_') or vc is None:
+                continue
+            n = struct.unpack_from('<I', d, vc.start)[0]
+            if 4 + 12 * n == vc.end - vc.start:
+                out.setdefault(_cstr(d[k[0xf4].start:k[0xf4].end]),
+                               list(struct.iter_unpack('<3f', d[vc.start + 4:vc.end])))
+    return out
+
+
+def zone_matrix_to(geom, verts):
+    """The matrix of a zone that puts its loaded vertices onto `verts` (the same zone moved, turned or stretched:
+    the best fit by least squares), None when they do not match."""
+    if len(verts) != len(geom.verts) or len(verts) < 2:
+        return None
+    n = len(verts)
+    cx, cy, cz = geom.centre
+    d = [(x - cx, z - cz) for x, _y, z in geom.verts]
+    o = [(x, z) for x, _y, z in verts]
+    dm = (sum(p[0] for p in d) / n, sum(p[1] for p in d) / n)
+    om = (sum(p[0] for p in o) / n, sum(p[1] for p in o) / n)
+    D = [(p[0] - dm[0], p[1] - dm[1]) for p in d]
+    W = [(p[0] - om[0], p[1] - om[1]) for p in o]
+    # M = (D^T D)^-1 D^T W (row vectors: w = d M)
+    a11 = sum(p[0] * p[0] for p in D)
+    a12 = sum(p[0] * p[1] for p in D)
+    a22 = sum(p[1] * p[1] for p in D)
+    det = a11 * a22 - a12 * a12
+    if abs(det) < 1e-9:
+        return None                          # a line: the turn is not known
+    b = [[sum(p[i] * q[j] for p, q in zip(D, W)) for j in range(2)] for i in range(2)]
+    m00 = (a22 * b[0][0] - a12 * b[1][0]) / det
+    m01 = (a22 * b[0][1] - a12 * b[1][1]) / det
+    m10 = (-a12 * b[0][0] + a11 * b[1][0]) / det
+    m11 = (-a12 * b[0][1] + a11 * b[1][1]) / det
+    m = list(IDENT)
+    m[0], m[2], m[8], m[10] = m00, m01, m10, m11
+    m[12] = om[0] - (dm[0] * m00 + dm[1] * m10)
+    m[14] = om[1] - (dm[0] * m01 + dm[1] * m11)
+    m[13] = cy + sum(v[1] - g[1] for v, g in zip(verts, geom.verts)) / n
+    return tuple(m)
 
 
 def zone_height(text):

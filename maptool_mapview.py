@@ -10,7 +10,8 @@ from tkinter import messagebox, ttk
 from tsmap import _, native
 from tsmap.lg import LevelFile
 from tsmap.mapview import (MODES, SPAWN_FLAGS, Camera, LevelView, instance_kind, instance_records, matrix_yaw,
-                           mesh_thumbnail, move_matrix, png_base64, ppm, template_meshes, unique_name)
+                           mesh_thumbnail, move_matrix, png_base64, ppm, template_meshes, unique_name, _hull,
+                           zone_matrix, zone_matrix_to, zone_patches, zone_points, zone_shape, zone_vertices)
 
 COLORS = {'start': '#4aa8ff', 'pickup': '#60d060', 'vehicle': '#ff9a2e', 'object': '#e8c84a', 'node': '#d080ff',
           'sound': '#9a9a9a', 'effect': '#b8a878', 'light': '#fff3a8', 'flag': '#ff60c0'}
@@ -105,12 +106,15 @@ class MapWindow(tk.Toplevel):
         self.edit_name = ttk.Label(ed, width=30, anchor='w')
         self.edit_name.pack(side='left')
         self.edit_vars = {}
-        for key in ('X', 'Y', 'Z', _('Angle')):
+        self.size_entries = []                                 # width and length: zones only
+        for key in ('X', 'Y', 'Z', _('Angle'), _('Width'), _('Length')):
             ttk.Label(ed, text=key).pack(side='left', padx=(6, 2))
             v = self.edit_vars[key] = tk.StringVar()
             e = ttk.Entry(ed, textvariable=v, width=7)
             e.pack(side='left')
             e.bind('<Return>', lambda ev: self._edit_set())
+            if key in (_('Width'), _('Length')):
+                self.size_entries.append(e)
         self.edit_buttons = [
             ttk.Button(ed, text=_('Set'), command=self._edit_set, width=7),
             ttk.Button(ed, text='⟲ 15°', command=lambda: self._edit_turn(15), width=6),
@@ -121,6 +125,7 @@ class MapWindow(tk.Toplevel):
             ttk.Button(ed2, text=_('Delete'), command=self._edit_delete),
             ttk.Button(ed2, text=_('Undo changes'), command=self._edit_undo),
         ]
+        self.instance_buttons = self.edit_buttons[5:7]          # copy and delete: not for zones
         for b in self.edit_buttons:
             b.pack(side='left', padx=(4, 0) if b.master is ed else (0, 4))
         # flags of the instance (chunk 0x1bb): spawn point teams and the game modes it is left out of
@@ -565,7 +570,7 @@ class MapWindow(tk.Toplevel):
                         c.create_line(a[0], a[1], b[0], b[1], fill='#ff9a2e', dash=(3, 3), tags='ov')
                         c.create_oval(a[0] - 3, a[1] - 3, a[0] + 3, a[1] + 3, outline='#ff9a2e', tags='ov')
             o = self._editable()
-            if o is not None:                             # heading: the object's local Z axis
+            if o is not None and o.geom is None:          # heading: the object's local Z axis
                 n = math.hypot(o.matrix[8], o.matrix[10]) or 1.0
                 tip = (o.pos[0] + 1.5 * o.matrix[8] / n, o.pos[1], o.pos[2] + 1.5 * o.matrix[10] / n)
                 a, b = scr(*o.pos), scr(*tip)
@@ -653,7 +658,7 @@ class MapWindow(tk.Toplevel):
             return                                    # in the list after saving
         if o.texts:
             self.tab.show_object(o.texts[0])
-        elif o.movable:
+        elif o.movable and o.geom is None:
             self.tab.show_instance(o.mpos)
 
     def highlight_instance(self, mpos):
@@ -691,9 +696,10 @@ class MapWindow(tk.Toplevel):
         self.status.set(self._describe(o))
 
     # ------------------------------------------------------------------ moving objects
-    # Only instances (0x1b9 records: start points, pickups, vehicles, objects, effects, sounds) can be moved: their
-    # matrix is changed in place. Zones and static geometry are part of the level's spatial grid (0x21f) and of
-    # its collision files, so they stay where they are.
+    # Instances (0x1b9 records: start points, pickups, vehicles, objects, effects, sounds) are moved by their
+    # matrix, changed in place. Zones are moved and turned by a matrix of their own (see ZoneGeom): their vertices,
+    # normals and box are rewritten in place; they cannot be copied or deleted (the spatial grid 0x21f counts the
+    # nodes of the scene). Static geometry is also in the collision files, so it stays where it is.
     def _toggle_edit(self):
         if self.edit_var.get():
             self.edit_bar.pack(fill='x', after=self.bar)
@@ -722,9 +728,17 @@ class MapWindow(tk.Toplevel):
         return len(self.moves) + len(self.added) + len(self.deleted) + len(self.flag_edits)
 
     def changes(self):
-        """Everything to save: (moves {offset: matrix}, adds [(name, Instance copied, matrix, flags)],
-        deletes {name}, flags {name: flags}, [(template, class)] of catalog objects for the preload list)."""
-        return (dict(self.moves), [(o.name, o.record, o.matrix, tuple(o.flags)) for o in self.added],
+        """Everything to save: (moves {offset: matrix, or bytes written in place for a zone}, adds [(name,
+        Instance copied, matrix, flags)], deletes {name}, flags {name: flags}, [(template, class)] of catalog
+        objects for the preload list)."""
+        zones = {o.mpos: o for o in self.view.objects if o.geom is not None} if self.view else {}
+        moves = {}
+        for key, m in self.moves.items():
+            if key in zones:
+                moves.update(zone_patches(zones[key].geom, m))
+            else:
+                moves[key] = m
+        return (moves, [(o.name, o.record, o.matrix, tuple(o.flags)) for o in self.added],
                 set(self.deleted), dict(self.flag_edits),
                 [(o.record.tpl, o.record.cls) for o in self.added if o.catalog])
 
@@ -741,6 +755,11 @@ class MapWindow(tk.Toplevel):
         state = ['!disabled'] if o else ['disabled']
         for b in self.edit_buttons + self.flag_checks:
             b.state(state)
+        if o is not None and o.geom is not None:          # a zone: moved, turned and stretched only
+            for b in self.instance_buttons + self.flag_checks:
+                b.state(['disabled'])
+        for e in self.size_entries:
+            e.state(['!disabled'] if o is not None and o.geom is not None else ['disabled'])
         if o is None:
             self.edit_name.configure(text=_('Select an object to edit') if self.edit_var.get() else '')
             for v in self.edit_vars.values():
@@ -751,12 +770,20 @@ class MapWindow(tk.Toplevel):
             return
         changed = o.new or o.deleted or o.mpos in self.moves or o.name in self.flag_edits
         self.edit_name.configure(text=o.name + (' ●' if changed else ''))
-        for key, val in zip(('X', 'Y', 'Z', _('Angle')), (*o.pos, matrix_yaw(o.matrix))):
+        for key, val in zip(('X', 'Y', 'Z', _('Angle')), (*o.pos, self._angle(o))):
             self.edit_vars[key].set('%.2f' % val if key != _('Angle') else '%.0f' % val)
+        size = zone_shape(o.geom, o.matrix)[:2] if o.geom is not None else None
+        for key, val in zip((_('Width'), _('Length')), size or ('', '')):
+            self.edit_vars[key].set('%.2f' % val if size else '')
         for flag, v in self.flag_vars.items():
             v.set(flag in o.flags)
         other = [f for f in o.flags if f not in self.flag_vars]
         self.flags_other.configure(text='&' + '&'.join(other) if other else '')
+
+    @staticmethod
+    def _angle(o):
+        """The angle field: the heading of an instance, the turn of a zone since it was loaded."""
+        return zone_shape(o.geom, o.matrix)[2] if o.geom is not None else matrix_yaw(o.matrix)
 
     def _set_matrix(self, o, m):
         """Move / turn an instance on the map; the move is saved together with the Scripts tab edits."""
@@ -764,7 +791,9 @@ class MapWindow(tk.Toplevel):
         if key not in self._loaded:
             self._loaded[key] = (o.pos, o.matrix, o.outline)
         pos0, m0, outline0 = self._loaded[key]
-        if o.outline and outline0:                        # the outline follows: turn around the old origin, move
+        if o.geom is not None:                            # a zone: its outline is the one that is saved
+            o.outline = _hull([(p[0], p[2]) for p in zone_points(o.geom, m, o.geom.verts)])
+        elif o.outline and outline0:                      # the outline follows: turn around the old origin, move
             turn = math.radians(matrix_yaw(m) - matrix_yaw(m0))
             c, s = math.cos(turn), math.sin(turn)
             o.outline = [(m[12] + (x - pos0[0]) * c + (z - pos0[2]) * s,
@@ -789,10 +818,18 @@ class MapWindow(tk.Toplevel):
             return
         try:
             x, y, z, a = (float(self.edit_vars[k].get().replace(',', '.')) for k in ('X', 'Y', 'Z', _('Angle')))
+            if o.geom is not None:
+                w, l = (float(self.edit_vars[k].get().replace(',', '.')) for k in (_('Width'), _('Length')))
         except ValueError:
             self.status.set(_('Position: numbers expected'))
             return
-        self._set_matrix(o, move_matrix(o.matrix, (x, y, z), a - matrix_yaw(o.matrix)))
+        m = o.matrix
+        if o.geom is not None:
+            if w <= 0.05 or l <= 0.05:
+                self.status.set(_('A zone must be at least 5 cm wide and long'))
+                return
+            m = zone_matrix(o.geom, m, w, l)
+        self._set_matrix(o, move_matrix(m, (x, y, z), a - self._angle(o)))
 
     def _edit_turn(self, deg):
         o = self._editable()
@@ -841,7 +878,7 @@ class MapWindow(tk.Toplevel):
 
     def _edit_flags(self):
         o = self._editable()
-        if o is None:
+        if o is None or o.geom is not None:
             return
         managed = list(self.flag_vars)
         flags = [f for f in o.flags if f not in managed]           # other flags keep their place
@@ -857,7 +894,7 @@ class MapWindow(tk.Toplevel):
     def _edit_copy(self):
         """A copy of the selected object next to it (with its flags and property text), selected to be moved."""
         src = self._editable()
-        if src is None or src.deleted:
+        if src is None or src.deleted or src.geom is not None:
             return
         taken = {o.name for o in self.view.objects}
         name = unique_name(src.name, taken)
@@ -918,7 +955,7 @@ class MapWindow(tk.Toplevel):
 
     def _edit_delete(self):
         o = self._editable()
-        if o is None or o.deleted:
+        if o is None or o.deleted or o.geom is not None:
             return
         if o.new:
             self._remove_new(o)
@@ -948,9 +985,11 @@ class MapWindow(tk.Toplevel):
             try:
                 with self.app.lock:
                     data = game.level_data(cls, original=True)
+                lf = LevelFile(data)
                 mats = {}
-                for rec in instance_records(LevelFile(data)):
+                for rec in instance_records(lf):
                     mats.setdefault(rec.name, rec.matrix)
+                mats.update({('zone', name): v for name, v in zone_vertices(lf).items()})
             except Exception as e:                          # noqa: BLE001 - reported in the status line
                 msg = str(e)
                 self.app.msgs.put(('call', lambda: self.status.set(msg)))
@@ -961,10 +1000,14 @@ class MapWindow(tk.Toplevel):
         threading.Thread(target=work, daemon=True).start()
 
     def _place_original(self, o, mats):
-        if o.name not in mats or o not in self.view.objects:
+        if o.geom is not None:                     # a zone: its vertices in the original level
+            m = zone_matrix_to(o.geom, mats.get(('zone', o.name), ()))
+        else:
+            m = mats.get(o.name)
+        if m is None or o not in self.view.objects:
             self.status.set(_('%s is not in the original level', o.name))
             return
-        self._set_matrix(o, mats[o.name])
+        self._set_matrix(o, m)
         self.status.set(self._describe(o))
 
     def forget_changes(self):

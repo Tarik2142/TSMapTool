@@ -265,6 +265,9 @@ UK = {
     'Angle': 'Кут',
     'Edit objects': 'Редагування',
     'Catalog...': 'Каталог...',
+    'Width': 'Ширина',
+    'Length': 'Довжина',
+    'A zone must be at least 5 cm wide and long': 'Зона має бути завширшки й завдовжки щонайменше 5 см',
     'Debris': 'Уламки',
     'a template of the game, check in game whether it works in multiplayer':
         'шаблон гри, чи працює він у мультиплеєрі, видно лише в грі',

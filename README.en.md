@@ -169,6 +169,14 @@ The **Map** button shows the map selected on the **Scripts** tab from above.
     grey and kept. Start points and CTF flag positions are recognised by these flags (`swMP_SP_*`,
     `swMP_RED/BLUE_FLAG_POS`), so they show up on maps where they are not named `start_pos`.
   - **Undo changes** returns the selected object to its saved state (removes a new one).
+  - **Zones** (spawners, sound zones, fog, kill zones ...) are moved and turned the same way: by their marker,
+    with X, Y, Z and the angle, R / Shift+R; **Original position** puts them back where the original level has
+    them. They turn around their centre. **Width** and **Length** stretch a zone along its own axes (the sides
+    of the smallest rectangle around it; the width is the one nearer to X) around its centre; the height is set
+    by the property text (`DOMAIN { height = N }`). Zones cannot be copied or deleted and have no flags (the
+    **Bots and vehicles** tab changes their type). Saving rewrites the zone's vertices (`0xf1`), normals
+    (`0x110`) and box (`0x11d`) in place; in the level's spatial grid (`0x21f`) the zone stays where it was. A
+    moved spawner triggered at its new place in game; check the other kinds of zones in game.
   - **Catalog.** **Catalog...** lists everything found on the game's multiplayer maps (weapons and items,
     boxes, barrels, turrets, plants ...) and the vehicles of the **Bots and vehicles** tab. The chosen object
     appears on the floor in the middle of the view; drag it into place. It is a record of another map
@@ -192,8 +200,8 @@ The **Map** button shows the map selected on the **Scripts** tab from above.
   The changes are saved together with the script edits (**Save** in the map window or on the **Scripts**
   tab). A move changes only the matrix of the record. Copy and delete add or remove a record in the object
   section and update the record count at its start; the rest of the file is written again from the chunk
-  tree. Zones, walls and other static geometry cannot be edited: they are part of the level's spatial grid
-  and of its collision files. The geometry of doors and gates is updated in the picture after saving.
+  tree. Walls and other static geometry cannot be edited: they are part of the level's spatial grid and of
+  its collision files. The geometry of doors and gates is updated in the picture after saving.
 
 X points right and Z up. The orientation matches the game: pickups and start points moved on the map end
 up where they were put.
