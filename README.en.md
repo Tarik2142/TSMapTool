@@ -134,8 +134,10 @@ The **Map** button shows the map selected on the **Scripts** tab from above.
   object, the geometry itself is updated after saving.
 - **Link to the list.** Clicking an object on the map selects its text in the **Scripts** list (the list
   filters are cleared when they hide it). Selecting an object in the list marks it on the map. Objects
-  without a property text (most pickups, start points) are listed in grey when **Only objects with scripts**
-  is off: there is nothing to edit in them, but they are listed and can be moved on the map.
+  without a property text (most pickups, start points, objects from the catalog) are listed in grey when
+  **Only objects with scripts** is off; they are listed and can be moved on the map. A text typed for such an
+  object becomes its property text and script when saved (its record gets a chunk `0x1ba`, as the game's records
+  with a text have), for example `AI { BEHAVIORS ... }` and `#ssl ... end` for a mech, as in the campaign.
 - **Controls.** The wheel zooms, dragging or WASD / arrows (Shift: faster) move the map, **Fit** goes back
   to the whole map. The bottom line
   shows X, Y, Z under the cursor (Y is the height of the surface). Right click copies them to the clipboard,

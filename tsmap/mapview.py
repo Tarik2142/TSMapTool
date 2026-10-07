@@ -716,11 +716,13 @@ def flags_payload(flags):
     return ('&' + '&'.join(flags) if flags else '').encode('latin1') + b'\0'
 
 
-def edit_instances(lf, adds=(), deletes=(), flags=None):
+def edit_instances(lf, adds=(), deletes=(), flags=None, texts=None):
     """Level bytes with instances added / deleted and flags changed, all by instance name:
         adds     [(new name, Instance to copy, matrix, flags)]  appended to the end of section 0x1b8
         deletes  {name}
         flags    {name: flags}
+        texts    {name: text} a property text (and script) for an instance that has none: its record gets
+                 a text chunk 0x1ba, as the records of the game with a text have
     The record count at the start of section 0x1b8 follows."""
     recs = {r.name: r for r in instance_records(lf)}
     for name, *_rest in adds:
@@ -741,6 +743,21 @@ def edit_instances(lf, adds=(), deletes=(), flags=None):
         delete.add(r.chunk)
         if r.fchunk is not None:
             delete.add(r.fchunk)
+    replace = {}
+    for name, text in (texts or {}).items():
+        if name in deletes:
+            continue
+        r = recs.get(name)
+        if r is None:
+            raise ValueError('instance %s not found' % name)
+        if any(tag == TEXT for tag, _p in r.children):
+            raise ValueError('instance %s has a text already' % name)
+        body = text.replace('\r\n', '\n').replace('\n', '\r\n').encode('latin1')   # UnicodeEncodeError: not Latin
+        if b'\0' in body:
+            raise ValueError('text must not contain NUL characters')
+        c = r.chunk
+        head = lf.data[c.start:c.end] if c.children is None else lf.data[c.start:c.start + c.pre]
+        replace[c] = (0x1b9, head, list(r.children) + [(TEXT, body + b'\0')])
     new = []
     for name, src, m, fl in adds:
         head = (b'SNIA' + b'\0'.join(s.encode('latin1') for s in (name, src.tpl, src.cls)) + b'\0'
@@ -755,7 +772,8 @@ def edit_instances(lf, adds=(), deletes=(), flags=None):
             raise ValueError('cannot add to an empty instance section')
         insert[keep[-1]] = new
     prefix = struct.pack('<I', count)
-    return lf.rebuild(payloads=payloads, prefixes={section: prefix}, insert_after=insert, delete=delete)
+    return lf.rebuild(payloads=payloads, prefixes={section: prefix}, insert_after=insert, delete=delete,
+                      replace=replace)
 
 
 def unique_name(base, taken):

@@ -266,6 +266,8 @@ UK = {
     'Edit objects': 'Редагування',
     'Catalog...': 'Каталог...',
     'Width': 'Ширина',
+    'no property text yet: what you type here becomes it': 'тексту властивостей ще немає: введене тут стане ним',
+    '%s: property texts written for %d objects': '%s: тексти властивостей записано для %d об\'єктів',
     'campaign': 'кампанія',
     'Transparent and effects': 'Прозоре й ефекти',
     'Scale X': 'Масштаб X',

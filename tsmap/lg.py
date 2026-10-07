@@ -194,16 +194,18 @@ class LevelFile:
             struct.pack_into('<I', out, moved(c.header) + 2, moved(c.end))
         return bytes(out)
 
-    def rebuild(self, payloads=None, prefixes=None, insert_after=None, delete=()):
+    def rebuild(self, payloads=None, prefixes=None, insert_after=None, delete=(), replace=None):
         """New file bytes written from the chunk tree, for changes of the structure:
             payloads      {leaf chunk: new payload}
             prefixes      {chunk with children: new raw prefix} (e.g. a record count)
             insert_after  {chunk: [new chunk, ...]} siblings written right after it; a new chunk is
                           (tag, payload bytes) or (tag, prefix bytes, [new chunk, ...])
             delete        chunks left out (with everything inside)
+            replace       {chunk: new chunk} written in its place (a leaf record that gets children)
         Every end offset is computed again, so unchanged input gives the same bytes."""
         d = self.data
         payloads, prefixes, insert_after = payloads or {}, prefixes or {}, insert_after or {}
+        replace = replace or {}
         delete = set(delete)
         out = bytearray()
 
@@ -226,6 +228,11 @@ class LevelFile:
 
         def write(c):
             if c in delete:
+                return
+            if c in replace:
+                write_new(replace[c])
+                for spec in insert_after.get(c, ()):
+                    write_new(spec)
                 return
             pos = open_chunk(c.tag)
             if c.children is None or c in payloads:

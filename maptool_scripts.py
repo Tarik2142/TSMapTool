@@ -23,7 +23,8 @@ class ScriptsTab(ttk.Frame):
         self.edits = {}            # object index -> edited text (not saved yet)
         self.current = None        # object index shown in the editor
         self.bare = []             # instances without a property text: (matrix offset, name, template, pos)
-        self.current_bare = None   # matrix offset of the one shown (read-only)
+        self.current_bare = None   # matrix offset of the one shown
+        self.new_texts = {}        # matrix offset -> property text written for an instance that has none
         self.functions = []
         self.map_rows = []
         self.saved_edited = False
@@ -180,7 +181,7 @@ class ScriptsTab(ttk.Frame):
 
     def unsaved(self):
         self._store_current()
-        return bool(self.edits or self._map_pending())
+        return bool(self.edits or self.new_texts or self._map_pending())
 
     def _map_pending(self):
         """Number of changes in the map window (moved / added / deleted objects, flags) not saved yet."""
@@ -217,6 +218,7 @@ class ScriptsTab(ttk.Frame):
 
     def _loaded(self, cls, level, edited):
         self.cls, self.level, self.edits, self.current = cls, level, {}, None
+        self.new_texts = {}
         # instances without a property text (most pickups, start points ...): listed read-only, for the map
         self.bare = [(r.mpos, r.name, r.tpl or r.cls, r.matrix[12:15]) for r in instance_records(level)
                      if not any(tag == TEXT for tag, payload in r.children)]
@@ -266,8 +268,11 @@ class ScriptsTab(ttk.Frame):
             q = self.search_var.get().lower()
             for mpos, name, ref, _pos in self.bare:
                 if not q or q in name.lower() or q in ref.lower():
-                    self.tree.insert('', 'end', iid='x%d' % mpos, tags=('bare',),
-                                     values=(name, ref, _(SECTION_NAMES['effects']), '', ''))
+                    text = self.new_texts.get(mpos)
+                    self.tree.insert('', 'end', iid='x%d' % mpos, tags=('changed',) if text else ('bare',),
+                                     values=(name, ref, _(SECTION_NAMES['effects']),
+                                             '✓' if text and re.search(r'(?m)^#ssl\s*$', text) else '',
+                                             '●' if text else ''))
         iid = 'x%d' % self.current_bare if self.current_bare is not None else str(self.current)
         if self.tree.exists(iid):
             self.tree.selection_set(iid)
@@ -292,7 +297,7 @@ class ScriptsTab(ttk.Frame):
             self.map_win.highlight_text(idx)
 
     def _on_bare(self, mpos):
-        """An instance without a property text: nothing to edit here, show what it is and where."""
+        """An instance without a property text: what is typed here becomes its text (and script) when saved."""
         if mpos == self.current_bare and self.current is None:
             return
         self._store_current()
@@ -300,10 +305,10 @@ class ScriptsTab(ttk.Frame):
         name, ref, pos = next((n, r, p) for m, n, r, p in self.bare if m == mpos)
         if self._map_open() and mpos in self.map_win.moves:
             pos = self.map_win.moves[mpos][12:15]
-        self.obj_var.set('%s   (%s, %s)' % (name, ref or '—', _(SECTION_NAMES['effects'])))
-        self._set_text(_('%s has no property text and no script, there is nothing to edit here.\n'
-                         'It can be moved, copied or deleted on the map (Map, Edit objects).', name)
-                       + '\n\n' + _('Position: %.2f, %.2f, %.2f', *pos), editable=False)
+        self.obj_var.set('%s   (%s, %s)   %s   %s' % (name, ref or '—', _(SECTION_NAMES['effects']),
+                                                     _('Position: %.2f, %.2f, %.2f', *pos),
+                                                     _('no property text yet: what you type here becomes it')))
+        self._set_text(self.new_texts.get(mpos, ''), editable=True)
         if self._map_open():
             self.map_win.highlight_instance(mpos)
 
@@ -350,8 +355,25 @@ class ScriptsTab(ttk.Frame):
         self.tree.see(str(idx))
 
     def _store_current(self):
-        """Keep the editor content of the current object in self.edits."""
-        if self.level is None or self.current is None or str(self.text['state']) == 'disabled':
+        """Keep the editor content of the current object in self.edits (self.new_texts for an instance that
+        has no text yet)."""
+        if self.level is None or str(self.text['state']) == 'disabled':
+            return
+        if self.current is None and self.current_bare is not None:
+            text = self.text.get('1.0', 'end-1c')
+            mpos = self.current_bare
+            if text.strip():
+                self.new_texts[mpos] = text
+            else:
+                self.new_texts.pop(mpos, None)
+            if self.tree.exists('x%d' % mpos):
+                vals = list(self.tree.item('x%d' % mpos, 'values'))
+                vals[3] = '✓' if re.search(r'(?m)^#ssl\s*$', text) else ''
+                vals[4] = '●' if mpos in self.new_texts else ''
+                self.tree.item('x%d' % mpos, values=vals, tags=('changed',) if mpos in self.new_texts else ('bare',))
+            self._update_state()
+            return
+        if self.current is None:
             return
         o = self.level.objects[self.current]
         text = self.text.get('1.0', 'end-1c')
@@ -373,9 +395,10 @@ class ScriptsTab(ttk.Frame):
         on_map = self._map_pending() if self.level else 0
         if not self.level:
             self.state_var.set('')
-        elif self.edits or on_map:
+        elif self.edits or self.new_texts or on_map:
+            changed = len(self.edits) + len(self.new_texts)
             self.state_var.set(', '.join(
-                ([_('Changed objects: %d (not saved)', len(self.edits))] if self.edits else [])
+                ([_('Changed objects: %d (not saved)', changed)] if changed else [])
                 + ([_('Map changes: %d (not saved)', on_map)] if on_map else [])))
         elif self.saved_edited:
             self.state_var.set(_('This level has saved edits'))
@@ -431,6 +454,11 @@ class ScriptsTab(ttk.Frame):
 
     # ------------------------------------------------------------------ actions
     def _revert_object(self):
+        if self.current is None and self.current_bare is not None:      # drop the text written for it
+            self.new_texts.pop(self.current_bare, None)
+            self._set_text('', editable=True)
+            self._store_current()
+            return
         if self.current is None:
             return
         self.edits.pop(self.current, None)
@@ -449,21 +477,25 @@ class ScriptsTab(ttk.Frame):
         self._store_current()
         moves, adds, deletes, flags, resources = (self.map_win.changes() if self._map_open()
                                                   else ({}, [], set(), {}, []))
-        if not self.edits and not (moves or adds or deletes or flags) and not apply:
+        names = {mpos: name for mpos, name, _ref, _pos in self.bare}
+        texts = {names[m]: t for m, t in self.new_texts.items() if m in names}
+        if not self.edits and not texts and not (moves or adds or deletes or flags) and not apply:
             return
         problems = []
-        for idx, text in self.edits.items():
+        checked = [(self.level.objects[idx].name, text) for idx, text in self.edits.items()] + list(texts.items())
+        for name, text in checked:
             for line, kind in check_script(text):
                 msg = {'end': _('extra "end"'), 'unclosed': _('a block is not closed with "end"'),
                        'quotes': _('unbalanced quotes')}[kind]
-                problems.append('%s: %s%s' % (self.level.objects[idx].name, msg,
-                                              _(' (line %d)', line) if line else ''))
+                problems.append('%s: %s%s' % (name, msg, _(' (line %d)', line) if line else ''))
         if problems and not messagebox.askyesno(_('Check'), _('Possible problems:') + '\n\n' + '\n'.join(problems[:15])
                                                 + '\n\n' + _('Save anyway?')):
             return
         try:
             for idx, text in self.edits.items():
                 self.level.encode_text(self.level.objects[idx], text)
+            for text in texts.values():
+                text.encode('latin1')
         except UnicodeEncodeError:
             messagebox.showerror(_('Error'), _('The text contains characters the game cannot store (use Latin letters only).'))
             return
@@ -475,8 +507,8 @@ class ScriptsTab(ttk.Frame):
                 data = apply_moves(level.data, moves)
             if edits:                                # the object indices do not change with the moves
                 data = (LevelFile(data) if data else level).replace_texts(edits)
-            if adds or deletes or flags:             # by instance name: last, it changes the structure
-                data = edit_instances(LevelFile(data) if data else level, adds, deletes, flags)
+            if adds or deletes or flags or texts:    # by instance name: last, it changes the structure
+                data = edit_instances(LevelFile(data) if data else level, adds, deletes, flags, texts)
             if data is not None:
                 LevelFile(data)                      # the result must parse again before it is stored
                 game.save_level_override(cls, data, self.app._say)
@@ -487,6 +519,8 @@ class ScriptsTab(ttk.Frame):
                 if adds or deletes or flags:
                     self.app._say(_('%s: %d objects added, %d deleted, flags of %d changed', cls, len(adds),
                                     len(deletes), len(flags)))
+                if texts:
+                    self.app._say(_('%s: property texts written for %d objects', cls, len(texts)))
             # objects from the catalog: templates, textures, sounds; with them every object added by an earlier
             # save (its list may lack what a newer version of the tool finds; "Save and apply" alone fixes it)
             extra = [t for t in placed_templates(game, cls, data or level.data) if t not in resources]
