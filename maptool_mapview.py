@@ -10,7 +10,8 @@ from tkinter import messagebox, ttk
 from tsmap import _, native
 from tsmap.lg import LevelFile
 from tsmap.mapview import (MODES, SPAWN_FLAGS, Camera, LevelView, instance_kind, instance_records, matrix_yaw,
-                           mesh_thumbnail, move_matrix, png_base64, ppm, template_meshes, unique_name, _hull,
+                           matrix_scale, mesh_thumbnail, move_matrix, png_base64, ppm, scale_matrix,
+                           template_meshes, unique_name, _hull,
                            zone_matrix, zone_matrix_to, zone_patches, zone_points, zone_shape, zone_vertices)
 
 COLORS = {'start': '#4aa8ff', 'pickup': '#60d060', 'vehicle': '#ff9a2e', 'object': '#e8c84a', 'node': '#d080ff',
@@ -42,7 +43,7 @@ class MapWindow(tk.Toplevel):
         self.s = 0.0               # 2D: pixels per metre (0: not fitted yet)
         self.heights = None        # 2D: (x0, z1, scale, w, h, heights) of the last rendered image
         self.cam = None            # 3D: Camera
-        self.picks = None          # 3D: (camera state, w, h, face ids) of the last full image
+        self.picks = None          # 3D: (camera state, w, h, face ids, view drawn) of the last full image
         self.photo = None
         self.selected = None
         self._pending = None       # object list index to mark once the view is ready
@@ -95,6 +96,10 @@ class MapWindow(tk.Toplevel):
                               ('names', _('Names'), False)):
             v = self.layers[key] = tk.BooleanVar(value=on)
             ttk.Checkbutton(bar, text=text, variable=v, command=self._draw).pack(side='left', padx=(10, 0))
+        # transparent and non-colliding geometry: effects (time fields), glass, light cones
+        self.fx_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text=_('Transparent and effects'), variable=self.fx_var,
+                        command=self._toggle_fx).pack(side='left', padx=(10, 0))
         ttk.Button(bar, text=_('Fit'), command=self._fit).pack(side='right')
 
         # object editing: shown with "Move objects"
@@ -106,15 +111,19 @@ class MapWindow(tk.Toplevel):
         self.edit_name = ttk.Label(ed, width=30, anchor='w')
         self.edit_name.pack(side='left')
         self.edit_vars = {}
-        self.size_entries = []                                 # width and length: zones only
-        for key in ('X', 'Y', 'Z', _('Angle'), _('Width'), _('Length')):
-            ttk.Label(ed, text=key).pack(side='left', padx=(6, 2))
+        # S1..S3: the size - width and length of a zone (metres), the scale of an instance along its axes
+        self.size_entries, self.size_labels = [], []
+        for key in ('X', 'Y', 'Z', _('Angle'), 'S1', 'S2', 'S3'):
+            label = ttk.Label(ed, text=key)
+            label.pack(side='left', padx=(6, 2))
             v = self.edit_vars[key] = tk.StringVar()
             e = ttk.Entry(ed, textvariable=v, width=7)
             e.pack(side='left')
             e.bind('<Return>', lambda ev: self._edit_set())
-            if key in (_('Width'), _('Length')):
+            if key.startswith('S'):
                 self.size_entries.append(e)
+                self.size_labels.append(label)
+        self._size_labels(None)
         self.edit_buttons = [
             ttk.Button(ed, text=_('Set'), command=self._edit_set, width=7),
             ttk.Button(ed, text='⟲ 15°', command=lambda: self._edit_turn(15), width=6),
@@ -351,7 +360,7 @@ class MapWindow(tk.Toplevel):
             return
         w, h = self._size()
         pw, ph = max(1, w // PREVIEW_SCALE), max(1, h // PREVIEW_SCALE)
-        rgb, _ids = self.view.render3d(self.cam, pw, ph, self._cut(), preview=True)
+        rgb, _ids = self._drawn(self.view).render3d(self.cam, pw, ph, self._cut(), preview=True)
         self.photo = tk.PhotoImage(data=ppm(rgb, pw, ph)).zoom(PREVIEW_SCALE)
         self.canvas.delete('img')
         self.canvas.create_image(0, 0, anchor='nw', image=self.photo, tags='img')
@@ -362,8 +371,20 @@ class MapWindow(tk.Toplevel):
         """3D: the world point under a canvas point, from the last full image (None while the camera moves)."""
         if not self.picks or self.picks[0] != self._cam_state() or self.picks[1:3] != self._size():
             return None
-        _state, w, h, ids = self.picks
-        return self.view.pick(self.cam, w, h, ids, int(px), int(py))
+        _state, w, h, ids, drawn = self.picks
+        return drawn.pick(self.cam, w, h, ids, int(px), int(py))
+
+    def _drawn(self, view):
+        """The view the images are drawn from: with the transparent geometry when it is switched on."""
+        return view.with_effects() if self.fx_var.get() else view
+
+    def _toggle_fx(self):
+        if not self.view:
+            return
+        if self.mode3d.get():
+            self._camera_changed(preview=False)
+        else:
+            self._changed()
 
     # ------------------------------------------------------------------ height cut
     def _cut(self):
@@ -402,7 +423,7 @@ class MapWindow(tk.Toplevel):
             self._again = True
             return
         w, h = self._size()
-        gen, view, cut = self.gen, self.view, self._cut()
+        gen, view, cut, fx = self.gen, self.view, self._cut(), self.fx_var.get()
 
         def cancel():
             return gen != self.gen
@@ -413,9 +434,10 @@ class MapWindow(tk.Toplevel):
             cam = Camera(*state, fov=self.cam.fov)       # a copy: the window may move the camera meanwhile
 
             def work3d():
-                r = view.render3d(cam, w, h, cut, cancel=cancel)
+                drawn = view.with_effects() if fx else view
+                r = drawn.render3d(cam, w, h, cut, cancel=cancel)
                 data = r and ppm(r[0], w, h)
-                self._frames.put(lambda: self._rendered3d(gen, view, state, w, h, data, r and r[1]))
+                self._frames.put(lambda: self._rendered3d(gen, view, state, w, h, data, r and (r[1], drawn)))
             threading.Thread(target=work3d, daemon=True).start()
             return
         x0, z1 = self.to_world(0, 0)
@@ -423,7 +445,7 @@ class MapWindow(tk.Toplevel):
         s = self.s
 
         def work():
-            r = view.render((x0, z0, x1, z1), w, h, cut, cancel=cancel)
+            r = (view.with_effects() if fx else view).render((x0, z0, x1, z1), w, h, cut, cancel=cancel)
             data = r and ppm(r[0], w, h)
             self._frames.put(lambda: self._rendered(gen, view, x0, z1, s, w, h, data, r and r[1]))
         threading.Thread(target=work, daemon=True).start()
@@ -465,7 +487,7 @@ class MapWindow(tk.Toplevel):
         self.canvas.delete('img')
         self.canvas.create_image(0, 0, anchor='nw', image=self.photo, tags='img')
         self.canvas.tag_lower('img')
-        self.picks = (state, w, h, ids)
+        self.picks = (state, w, h) + ids                  # ids: (face ids, the view they index)
         self._draw(Camera(*state, fov=self.cam.fov))      # in step with the image; the hidden markers are known
 
     def height_at(self, x, z):
@@ -483,10 +505,10 @@ class MapWindow(tk.Toplevel):
         that is not known (no full image of camera `cam`)."""
         if not self.mode3d.get() or self.picks is None:
             return None
-        state, w, h, ids = self.picks
+        state, w, h, ids, view = self.picks
         if state != (cam.target, cam.yaw, cam.pitch, cam.dist) or (w, h) != self._size():
             return None
-        e, view = cam.basis()[0], self.view
+        e = cam.basis()[0]
 
         def hidden(o, px, py):
             p = view.pick(cam, w, h, ids, int(px), int(py))
@@ -758,8 +780,9 @@ class MapWindow(tk.Toplevel):
         if o is not None and o.geom is not None:          # a zone: moved, turned and stretched only
             for b in self.instance_buttons + self.flag_checks:
                 b.state(['disabled'])
-        for e in self.size_entries:
-            e.state(['!disabled'] if o is not None and o.geom is not None else ['disabled'])
+        self._size_labels(o)
+        for i, e in enumerate(self.size_entries):
+            e.state(['!disabled'] if o is not None and (o.geom is None or i < 2) else ['disabled'])
         if o is None:
             self.edit_name.configure(text=_('Select an object to edit') if self.edit_var.get() else '')
             for v in self.edit_vars.values():
@@ -772,13 +795,22 @@ class MapWindow(tk.Toplevel):
         self.edit_name.configure(text=o.name + (' ●' if changed else ''))
         for key, val in zip(('X', 'Y', 'Z', _('Angle')), (*o.pos, self._angle(o))):
             self.edit_vars[key].set('%.2f' % val if key != _('Angle') else '%.0f' % val)
-        size = zone_shape(o.geom, o.matrix)[:2] if o.geom is not None else None
-        for key, val in zip((_('Width'), _('Length')), size or ('', '')):
-            self.edit_vars[key].set('%.2f' % val if size else '')
+        size = zone_shape(o.geom, o.matrix)[:2] if o.geom is not None else matrix_scale(o.matrix)
+        for i, key in enumerate(('S1', 'S2', 'S3')):
+            self.edit_vars[key].set('%.2f' % size[i] if i < len(size) else '')
         for flag, v in self.flag_vars.items():
             v.set(flag in o.flags)
         other = [f for f in o.flags if f not in self.flag_vars]
         self.flags_other.configure(text='&' + '&'.join(other) if other else '')
+
+    def _size_labels(self, o):
+        """The size fields: width and length of a zone, the scale of an instance (Y: its height)."""
+        if o is not None and o.geom is not None:
+            texts = (_('Width'), _('Length'), '')
+        else:
+            texts = (_('Scale X'), 'Y', 'Z')
+        for label, text in zip(self.size_labels, texts):
+            label.configure(text=text)
 
     @staticmethod
     def _angle(o):
@@ -793,11 +825,15 @@ class MapWindow(tk.Toplevel):
         pos0, m0, outline0 = self._loaded[key]
         if o.geom is not None:                            # a zone: its outline is the one that is saved
             o.outline = _hull([(p[0], p[2]) for p in zone_points(o.geom, m, o.geom.verts)])
-        elif o.outline and outline0:                      # the outline follows: turn around the old origin, move
-            turn = math.radians(matrix_yaw(m) - matrix_yaw(m0))
-            c, s = math.cos(turn), math.sin(turn)
-            o.outline = [(m[12] + (x - pos0[0]) * c + (z - pos0[2]) * s,
-                          m[14] - (x - pos0[0]) * s + (z - pos0[2]) * c) for x, z in outline0]
+        elif o.outline and outline0:
+            # the outline follows: back into the object's own (x, z) through the loaded matrix, out through the
+            # new one (turn, scale and place; a tilted object is followed approximately)
+            a, b, c, e = m0[0], m0[2], m0[8], m0[10]
+            det = a * e - b * c
+            if abs(det) > 1e-12:
+                local = [(((x - pos0[0]) * e - (z - pos0[2]) * c) / det, (-(x - pos0[0]) * b + (z - pos0[2]) * a) / det)
+                         for x, z in outline0]
+                o.outline = [(m[12] + u * m[0] + w * m[8], m[14] + u * m[2] + w * m[10]) for u, w in local]
         o.matrix, o.pos = tuple(m), tuple(m[12:15])
         if not o.new:
             if all(abs(a - b) < 1e-6 for a, b in zip(m, m0)):
@@ -818,17 +854,21 @@ class MapWindow(tk.Toplevel):
             return
         try:
             x, y, z, a = (float(self.edit_vars[k].get().replace(',', '.')) for k in ('X', 'Y', 'Z', _('Angle')))
-            if o.geom is not None:
-                w, l = (float(self.edit_vars[k].get().replace(',', '.')) for k in (_('Width'), _('Length')))
+            size = [float(self.edit_vars[k].get().replace(',', '.')) for k in ('S1', 'S2', 'S3')[:2 if o.geom else 3]]
         except ValueError:
             self.status.set(_('Position: numbers expected'))
             return
         m = o.matrix
         if o.geom is not None:
-            if w <= 0.05 or l <= 0.05:
+            if min(size) <= 0.05:
                 self.status.set(_('A zone must be at least 5 cm wide and long'))
                 return
-            m = zone_matrix(o.geom, m, w, l)
+            m = zone_matrix(o.geom, m, *size)
+        elif any(abs(s - c) > 0.005 for s, c in zip(size, matrix_scale(m))):   # the shown scale is rounded
+            if not all(0.01 <= s <= 100 for s in size):
+                self.status.set(_('Scale: from 0.01 to 100'))
+                return
+            m = scale_matrix(m, size)
         self._set_matrix(o, move_matrix(m, (x, y, z), a - self._angle(o)))
 
     def _edit_turn(self, deg):

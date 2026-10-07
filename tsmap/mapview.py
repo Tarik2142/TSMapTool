@@ -26,6 +26,7 @@ PREVIEW_FACES = 12000             # faces drawn while the 3D camera moves (Pytho
 CANCEL_EVERY = 2048               # the Python drawing asks `cancel` after so many triangles
 BG = (0x1c, 0x1f, 0x24)           # background of the images
 HIDDEN_FLAGS = {'vis', 'nc', 'plrc', 'aiv', 'aic', 'ainv', 'ainc'}
+EFFECT_HIDDEN = {'vis', 'plrc', 'aiv', 'aic', 'ainv', 'ainc'}    # not even with "Transparent and effects"
 # instance flags (chunk 0x1bb after the record): spawn points by team, CTF flag positions, game mode filters
 SPAWN_FLAGS = ('swMP_SP_NONTEAM', 'swMP_SP_TEAM1', 'swMP_SP_TEAM2')
 FLAG_POS = ('swMP_RED_FLAG_POS', 'swMP_BLUE_FLAG_POS')
@@ -119,10 +120,14 @@ def _is_node(c):
 class LevelView:
     def __init__(self, lf, templates=None):
         """`templates` (TemplateMeshes) draws the instances whose template is not a prototype of the level
-        (boxes, barrels, vehicles, plants ...); without it they are markers only."""
+        (boxes, barrels, vehicles, plants ...); without it they are markers only. The transparent and
+        non-colliding geometry (effects, glass, light cones) goes to `fx`, drawn by with_effects()."""
         self.lf = lf
         self.templates = templates
         d = lf.data
+        fx = self.fx = LevelView.__new__(LevelView)
+        fx.lf, fx.vx, fx.vy, fx.vz, fx.faces, fx.tris = lf, [], [], [], [], []
+        self._fx_view = None
         self.objects = []
         self.tris = []             # (y max, y min, x0, z0, x1, z1, x2, z2, light, y mean), view coordinates X/Z
         self.vx, self.vy, self.vz = [], [], []      # all vertices, for the 3D view
@@ -152,6 +157,8 @@ class LevelView:
                 verts = self._verts(k)
                 if verts and _solid(flags):
                     self._add_mesh(verts, k)
+                elif verts and _effect(flags):
+                    fx._add_mesh(verts, k)
                 tc = k.get(0xfd)
                 texts = [text_index[t] for t in (tc.children or ()) if t.tag == TEXT and t in text_index] if tc else []
                 if not texts and not flags.startswith('&dom_'):
@@ -179,23 +186,32 @@ class LevelView:
             o.texts = [text_index[t] for t in c.children or () if t.tag == TEXT and t in text_index]
             proto = protos.get(tpl)
             if proto is not None:
-                pts = []
+                pts, fx_pts = [], []
                 for n in _walk_nodes(proto):
                     k = _kids(n)
                     chain = _mul(node_chain(d, n, proto), m)
                     verts = [_apply(chain, v) for v in self._verts(k)]
-                    if verts and _solid(_cstr(d[k[0x115].start:k[0x115].end]) if 0x115 in k else ''):
+                    flags = _cstr(d[k[0x115].start:k[0x115].end]) if 0x115 in k else ''
+                    if verts and _solid(flags):
                         self._add_mesh(verts, k)
                         pts += [(v[0], v[2]) for v in verts]
-                o.outline = _hull(pts) if pts else None
+                    elif verts and _effect(flags):
+                        fx._add_mesh(verts, k)
+                        fx_pts += [(v[0], v[2]) for v in verts]
+                # the footprint: of the solid parts, of the transparent ones when it has nothing else (an effect)
+                o.outline = _hull(pts or fx_pts) if pts or fx_pts else None
                 o.texts += [i for t, i in text_index.items() if _inside(t, proto)]
             elif templates is not None and instance_kind(name, tpl, rec.cls, rec.flags) not in ('effect', 'sound'):
-                pts = []
+                pts, fx_pts = [], []
                 for verts, tris in templates.get(tpl, rec.cls):
                     wv = [_apply(m, v) for v in verts]
                     self._add_faces(wv, tris)
                     pts += [(v[0], v[2]) for v in wv]
-                o.outline = _hull(pts) if pts else None
+                for verts, tris in templates.effects(tpl, rec.cls):
+                    wv = [_apply(m, v) for v in verts]
+                    fx._add_faces(wv, tris)
+                    fx_pts += [(v[0], v[2]) for v in wv]
+                o.outline = _hull(pts or fx_pts) if pts or fx_pts else None
             self.objects.append(o)
 
         # lights
@@ -242,9 +258,28 @@ class LevelView:
         """Footprint of an instance record placed with matrix m (its template mesh), None when unknown."""
         if self.templates is None:
             return None
-        pts = [(_apply(m, v)[0], _apply(m, v)[2]) for verts, tris in self.templates.get(record.tpl, record.cls)
-               for v in verts]
+        meshes = self.templates.get(record.tpl, record.cls) or self.templates.effects(record.tpl, record.cls)
+        pts = [(_apply(m, v)[0], _apply(m, v)[2]) for verts, tris in meshes for v in verts]
         return _hull(pts) if pts else None
+
+    def with_effects(self):
+        """The view with the transparent and non-colliding geometry too (the "Transparent and effects" switch):
+        a view of its own over the same objects, made on first use. The floor (floor_at) stays the solid one."""
+        fx = self.fx
+        if not fx.faces:
+            return self
+        if self._fx_view is None:
+            v = LevelView.__new__(LevelView)
+            v.__dict__.update(self.__dict__)
+            n = len(self.vx)
+            v.vx, v.vy, v.vz = self.vx + fx.vx, self.vy + fx.vy, self.vz + fx.vz
+            v.faces = self.faces + [(f[0] + n, f[1] + n, f[2] + n) + f[3:] for f in fx.faces]
+            v.tris = sorted(self.tris + fx.tris, key=lambda t: t[0])
+            v._colors = v._tcolors = v._preview = None
+            v._packed = {}
+            v._fx_view = v
+            self._fx_view = v
+        return self._fx_view
 
     def _add_faces(self, verts, tris):
         lx, ly, lz = LIGHT
@@ -755,8 +790,24 @@ def matrix_yaw(m):
     return math.degrees(math.atan2(m[8], m[10])) % 360
 
 
+def matrix_scale(m):
+    """(x, y, z) scale of an instance: the lengths of the rows of its matrix (its local axes)."""
+    return tuple(math.sqrt(m[r * 4] ** 2 + m[r * 4 + 1] ** 2 + m[r * 4 + 2] ** 2) for r in range(3))
+
+
+def scale_matrix(m, scale):
+    """Matrix m scaled to (x, y, z) along the object's own axes (its direction and place are kept). The game's
+    levels have scaled instances too (lamp flares 0.71, boxes stretched 1.29 along one axis)."""
+    out = list(m)
+    for r, (old, new) in enumerate(zip(matrix_scale(m), scale)):
+        k = new / old if old > 1e-9 else 0.0
+        out[r * 4:r * 4 + 3] = [v * k for v in m[r * 4:r * 4 + 3]]
+    return tuple(out)
+
+
 def move_matrix(m, pos, turn=0.0):
-    """Matrix m moved to `pos` and turned by `turn` degrees around the vertical axis (tilt and scale kept)."""
+    """Matrix m moved to `pos` and turned by `turn` degrees around the vertical axis (tilt and scale kept; for a
+    zone its stretch, see ZoneGeom)."""
     a = math.radians(turn)
     c, s = math.cos(a), math.sin(a)
     out = list(m)
@@ -1016,6 +1067,14 @@ def _visible_part(flags):
     return not (f & PART_HIDDEN or any(x.startswith(('tra', 'trp')) for x in f))
 
 
+def _effect_part(flags):
+    """A transparent part of a template (an effect, glass, the boost flame of the bike), not a hull or helper."""
+    if flags.startswith('&dom_'):
+        return False
+    f = set(flags.replace(' ', '').split('&'))
+    return not (f & PART_HIDDEN) and any(x.startswith(('tra', 'trp')) for x in f)
+
+
 def node_chain(d, node, stop):
     """Matrix from a node's space to the space of `stop` (a template / prototype record): the 0xf9 matrices of
     the node and its parents (row vectors, child first). Mesh vertices are in their node's space; in the scene of a
@@ -1063,6 +1122,13 @@ class TemplateMeshes:
 
     def get(self, *names):
         """Meshes of the first name that is a template (an instance gives its template, then its class)."""
+        return self._parts(names)[0]
+
+    def effects(self, *names):
+        """The transparent parts of that template (effects, glass), drawn by "Transparent and effects"."""
+        return self._parts(names)[1]
+
+    def _parts(self, names):
         for name in names:
             if not name:
                 continue
@@ -1071,7 +1137,7 @@ class TemplateMeshes:
                 self.cache[key] = self._load(key)
             if self.cache[key] is not None:
                 return self.cache[key]
-        return []
+        return [], []
 
     def _load(self, name):
         e = self.arc.get(name, 12)
@@ -1086,18 +1152,21 @@ class TemplateMeshes:
             r = _parse(d, 0, len(d), None, 0)
         except Exception:                 # noqa: BLE001 - an unreadable template is drawn as a marker
             return None
-        out = []
+        solid, fx = [], []
         for top in (r[1] if r else ()):
             for n in _walk_nodes(top):
                 k = _kids(n)
                 flags = _cstr(d[k[0x115].start:k[0x115].end]) if 0x115 in k else ''
                 mesh = node_mesh(d, k)
-                if mesh and _visible_part(flags):
+                if not mesh:
+                    continue
+                part = solid if _visible_part(flags) else fx if _effect_part(flags) else None
+                if part is not None:
                     m = node_chain(d, n, top)
                     if m != IDENT:
                         mesh = ([_apply(m, v) for v in mesh[0]], mesh[1])
-                    out.append(mesh)
-        return out
+                    part.append(mesh)
+        return solid, fx
 
 
 def template_meshes(game, lock=None):
@@ -1134,6 +1203,16 @@ def _solid(flags):
         return False
     f = set(flags.replace(' ', '').split('&'))
     return not (f & HIDDEN_FLAGS or any(x.startswith(('tra', 'trp')) for x in f))
+
+
+def _effect(flags):
+    """Geometry that _solid leaves out but "Transparent and effects" draws: transparent (&tra_N, &trp_N) and
+    non-colliding (&nc) meshes - effects such as the time fields, glass, light cones, decals; not the sky (&vis),
+    domains or invisible helpers."""
+    if flags.startswith('&dom_'):
+        return False
+    f = set(flags.replace(' ', '').split('&'))
+    return not (f & EFFECT_HIDDEN) and ('nc' in f or any(x.startswith(('tra', 'trp')) for x in f))
 
 
 def _walk_nodes(c):

@@ -127,6 +127,11 @@ The **Map** button shows the map selected on the **Scripts** tab from above.
   and single floors. It starts 3 m above the highest start point or pickup.
 - **Objects.** Start points, pickups (weapons included), vehicles, objects and zones with their outlines.
   Layers can be switched on and off; effects, sounds and lights are hidden by default.
+- **Transparent and effects.** Transparent and non-colliding geometry (`&tra_N`, `&trp_N`, `&nc`: time fields,
+  glass, light cones, decals) is not drawn by default, it would cover the map. The **Transparent and effects**
+  switch draws it, solid, with the rest (not the sky `&vis`, zones or invisible helper meshes). An object made of
+  such geometry only (`act_time_fieldBig`) always has an outline from it: the outline moves and scales with the
+  object, the geometry itself is updated after saving.
 - **Link to the list.** Clicking an object on the map selects its text in the **Scripts** list (the list
   filters are cleared when they hide it). Selecting an object in the list marks it on the map. Objects
   without a property text (most pickups, start points) are listed in grey when **Only objects with scripts**
@@ -160,6 +165,11 @@ The **Map** button shows the map selected on the **Scripts** tab from above.
     keeps its height above the floor. **On the floor** drops the selected object, **Original position** puts
     it where the original game level has it. The arrow shows the local Z axis; for start points it is the
     direction the player faces after spawning (checked in game).
+  - **Scale.** **Scale X / Y / Z** sets the size of an object along its own axes (Y: the height) as a factor
+    of its model; turning and dragging keep it. The engine reads the scale from the record's matrix: the
+    original maps have thousands of scaled instances (lamp flares 0.71, boxes 1.29 along one axis, the time field
+    effect `act_time_fieldBig` on `dlc1_multiplayer14` 2.32 x 0.45 x 0.84). How strongly stretched objects with
+    physics or collision (boxes, vehicles) behave is not checked.
   - **Copy / Delete.** A copy appears next to the object with the same template, flags and property text and
     a new name (`start_pos17`, `item_armor3_2` ...); drag it into place. When scripts use the object being
     deleted (`$name`), the tool warns. Until saved, a deleted object is shown as a red cross, an added one
