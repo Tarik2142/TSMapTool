@@ -266,6 +266,7 @@ UK = {
     'Edit objects': 'Редагування',
     'Catalog...': 'Каталог...',
     'Width': 'Ширина',
+    'campaign': 'кампанія',
     'Transparent and effects': 'Прозоре й ефекти',
     'Scale X': 'Масштаб X',
     'Scale: from 0.01 to 100': 'Масштаб: від 0,01 до 100',

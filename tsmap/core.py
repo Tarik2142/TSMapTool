@@ -649,6 +649,22 @@ class Game:
         rows.sort(key=lambda r: r['id'])
         return rows
 
+    def campaign_maps(self):
+        """Rows of the single player levels of the game list (experimental: viewed and edited on the Scripts tab
+        like the multiplayer maps; an edited level is packed by apply() like any edited original file)."""
+        edited = {o['level'].lower() for o in self.library()['overrides']}
+        strings = self.orig_strings(self.language)
+        rows = []
+        for m in self.orig_maps:
+            if m['section'] != 'singleplayer':
+                continue
+            pd = dict(m['props'])
+            name = string_lookup(strings, unquote(pd.get('nameId', ''))) or ''
+            rows.append({'class': m['class'], 'id': m['id'], 'title': name or m['class'], 'name': name,
+                         'kind': 'campaign', 'edited': m['class'].lower() in edited})
+        rows.sort(key=lambda r: r['id'])
+        return rows
+
     def map_details(self, cls):
         """(description, preview PNG bytes or None) for a map."""
         lang = self.language

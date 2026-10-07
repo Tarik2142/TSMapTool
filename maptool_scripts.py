@@ -127,9 +127,16 @@ class ScriptsTab(ttk.Frame):
 
     # ------------------------------------------------------------------ maps
     def refresh_maps(self, rows):
-        """Called by the app whenever the map list changes."""
+        """Called by the app whenever the map list changes. The single player levels follow the multiplayer
+        maps (an experiment: the same viewing and editing)."""
         self.map_rows = [r for r in rows if r['kind'] in ('original', 'custom', 'hidden')]
-        self.map_box['values'] = ['%2d  %s  [%s]%s' % (r['id'], r['title'], r['class'], '  ✎' if r.get('edited') else '')
+        try:
+            self.map_rows += self.app.game.campaign_maps() if self.app.game else []
+        except Exception:                 # noqa: BLE001 - the multiplayer maps are listed anyway
+            pass
+        self.map_box['values'] = ['%2d  %s  [%s]%s%s' % (r['id'], r['title'], r['class'],
+                                                        '  — ' + _('campaign') if r['kind'] == 'campaign' else '',
+                                                        '  ✎' if r.get('edited') else '')
                                   for r in self.map_rows]
         if self.cls:
             for i, r in enumerate(self.map_rows):
