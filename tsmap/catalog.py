@@ -103,21 +103,22 @@ def build_catalog(game, lock=None):
             continue
         e = found[('vehicle', tpl.lower())] = Entry()
         e.kind, e.tpl, e.cls, e.maps, e.count, e.tested, e.extra = 'vehicle', tpl, cls, set(), 0, checked, False
-        e.record = _record(tpl, cls)
+        e.record = _record(tpl, tpl, cls)
     out = []
     for e in found.values():
         e.record = _clean(e.record)
         e.maps = sorted(e.maps)
         out.append(e)
-    taken = {n.lower() for e in out for n in (e.tpl, e.cls) if n}
+    # templates already in the catalog: by template, or by class for a class-only entry (item_mp_sniper)
+    taken = {(e.tpl or e.cls).lower() for e in out}
     out += _extras(game, lock, taken)
     order = {'pickup': 0, 'vehicle': 1, 'object': 2, 'plant': 3, 'debris': 4}
     return sorted(out, key=lambda e: (order[e.category], e.extra, e.label.lower(), e.cls.lower()))
 
 
-def _record(tpl, cls):
-    """A new instance record of a template: name and template the same, no flags, no text."""
-    return Instance(None, tpl, tpl, cls, IDENT, None, None, (), b'\0' + struct.pack('<16f', *IDENT), [])
+def _record(name, tpl, cls):
+    """A new instance record: no flags, no text."""
+    return Instance(None, name, tpl, cls, IDENT, None, None, (), b'\0' + struct.pack('<16f', *IDENT), [])
 
 
 def template_class(data):
@@ -130,7 +131,11 @@ def template_class(data):
 
 
 def _extras(game, lock, taken):
-    """[Entry] for the templates of the game that no multiplayer map places (not tested)."""
+    """[Entry] for the templates of the game that no multiplayer map places (not tested). A template with a class
+    of its own name that takes it (class mech: nameTpl = mech) is placed as that class without a template, as the
+    campaign places its mechs: the template's head says only `dynamic`, an animated object without AI."""
+    from .spawn import resource_index
+    own = resource_index(game)
     out = []
     for ent in game.orig['main'].entries:
         name = ent.name
@@ -148,11 +153,14 @@ def _extras(game, lock, taken):
         cls = template_class(data)
         if cls is None or cls in EXTRA_SKIP_CLASSES or cls.lower().startswith(EXTRA_SKIP_PREFIXES):
             continue
-        kind = instance_kind(name, name, cls, ())
+        tpl = name
+        if low in own.blocks and low in own.uses_tpl.get(low, ()) and not low.startswith('wpn_'):
+            tpl, cls = '', name                   # its own class (mech), the class takes the model
+        kind = instance_kind(name, tpl, cls, ())
         if kind in SKIP_KINDS:
             continue
         e = Entry()
-        e.kind, e.tpl, e.cls, e.record, e.maps, e.count = kind, name, cls, _record(name, cls), [], 0
+        e.kind, e.tpl, e.cls, e.record, e.maps, e.count = kind, tpl, cls, _record(name, tpl, cls), [], 0
         e.tested, e.extra = False, True
         out.append(e)
     return out

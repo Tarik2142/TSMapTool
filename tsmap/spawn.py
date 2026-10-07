@@ -14,6 +14,7 @@ places of their zone when a player enters it; the bike placed on the map and spa
 after it is destroyed. Moving bots (MULXNS / WILLROCK) need navigation that multiplayer maps lack.
 """
 import collections
+import os
 import re
 import struct
 
@@ -337,6 +338,14 @@ class ResourceIndex:
                 for t in re.findall(r'\bnameTpl\s*=\s*"?(\w+)', b):
                     self.uses_tpl[t.lower()].add(c)
         self.waves = {e.name.lower(): self.game.read_orig('main', e) for e in self.arc.entries if e.type == 10}
+        self._sounds = {}
+
+    def _is_sound(self, name):
+        """A sound of a bank: the name itself is in a sound bank (steps and deaths named in a model)."""
+        if name not in self._sounds:
+            key = name.encode('latin1')
+            self._sounds[name] = any(key in d for d in self.waves.values())
+        return self._sounds[name]
 
     def _bank(self, sound):
         toks = re.sub(r'(_rnd_set|_set|_loop)$', '', sound.lower()).split('_')
@@ -377,6 +386,9 @@ class ResourceIndex:
                             todo_t.append(w)
                         elif ty in sections:
                             out[sections[ty]].add(w)
+                    # sounds named by the model itself: the steps, landing and death of the mech
+                    if w not in self.names and SOUND_NAME.match(w) and self._is_sound(w):
+                        sounds.add(w)
             else:
                 c, mode = todo_c.pop()
                 if seen_c.get(c, -1) >= mode:
@@ -397,11 +409,31 @@ class ResourceIndex:
                                     todo_t.append(w)
                                 elif ty in sections:
                                     out[sections[ty]].add(w)
-                    for sl in re.findall(r'sounds_list\s*\{(.*?)\}', b, re.S):
-                        sounds.update(v for v in re.findall(r'=\s*"?([A-Za-z_]\w+)', sl) if v not in ('Yes', 'No'))
+                    for sl in _blocks_named(b, 'sounds_list'):
+                        # name = sound, or name { file = sound  nameObj = node the sound comes from }
+                        sounds.update(v for k, v in re.findall(r'(\w+)\s*=\s*"?([A-Za-z_]\w+)', sl)
+                                      if v not in ('Yes', 'No') and k.lower() != 'nameobj')
         out['Sounds'] = sounds
         out['WaveBanks_mem'] = {b for s in sounds for b in self._bank(s)}
+        # a memory bank X_mem comes with the streamed bank X (sounds\pc\X.fsb), as the game's lists have them
+        out['WaveBanks_strm_file'] = {b[:-4] for b in out['WaveBanks_mem'] if b.endswith('_mem') and os.path.isfile(
+            os.path.join(self.game.dir, 'sounds', 'pc', b[:-4] + '.fsb'))}
         return {k: sorted(v) for k, v in out.items() if v}
+
+
+SOUND_NAME = re.compile(r'(obj|wpn|amb|mus|vo|ex|whc|mpt|sfx)_\w+$')
+
+
+def _blocks_named(text, name):
+    """Bodies of the `name { ... }` blocks of a class text, nested blocks included."""
+    out = []
+    for m in re.finditer(r'\b%s\s*\{' % re.escape(name), text):
+        depth, i = 1, m.end()
+        while i < len(text) and depth:
+            depth += {'{': 1, '}': -1}.get(text[i], 0)
+            i += 1
+        out.append(text[m.end():i - 1])
+    return out
 
 
 def resource_index(game):
@@ -486,8 +518,8 @@ def placed_templates(game, cls, data):
     arc = game.orig['main']
     out = []
     for r in instance_records(LevelFile(data)):
-        key = (r.tpl, r.cls)
-        if (r.tpl and r.name not in own and ('Templates', r.tpl.lower()) not in shipped and key not in out
-                and arc.get(r.tpl.lower(), 12) is not None):
+        key, model = (r.tpl, r.cls), r.tpl or r.cls        # a class-only one (the mech) takes its class's model
+        if (model and r.name not in own and ('Templates', model.lower()) not in shipped and key not in out
+                and arc.get(model.lower(), 12) is not None):
             out.append(key)
     return out
